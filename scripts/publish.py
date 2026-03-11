@@ -302,7 +302,7 @@ def run_set_policy(source: str, section: str | None = None):
             sys.exit(1)
         print(f"  Fetching Confluence page {page_id} ...")
         adf_body, page_title = fetch_page_adf(page_id)
-        policy_text = _node_text(adf_body)
+        policy_text = _adf_to_markdown(adf_body)
         source_desc = page_title
     else:
         path = Path(source)
@@ -310,7 +310,8 @@ def run_set_policy(source: str, section: str | None = None):
             print(f"ERROR: File not found: {source}")
             sys.exit(1)
         ingested = ingest_file(source)
-        policy_text = _node_text(ingested) if isinstance(ingested, dict) else ingested
+        # For ADF sources (docx, json) convert to markdown to preserve heading markers
+        policy_text = _adf_to_markdown(ingested) if isinstance(ingested, dict) else ingested
         source_desc = path.name
 
     if section:
@@ -1193,7 +1194,7 @@ def ingest_pdf(path: str) -> str:
 
 
 def ingest_file(source: str):
-    """Return ADF dict for .docx, or plain text str for all other sources."""
+    """Return ADF dict for .docx/.json ADF, or plain text str for all other sources."""
     if source.startswith("https://docs.google.com"):
         return ingest_google_doc(source)
     p = Path(source)
@@ -1218,8 +1219,75 @@ def ingest_file(source: str):
         return docx_to_adf(str(p))   # built-in cleanup via docx_to_adf
     elif ext == ".pdf":
         return ingest_pdf(str(p))
+    elif ext == ".json":
+        try:
+            data = json.loads(p.read_text(encoding='utf-8'))
+            # Accept bare ADF doc or wrapped {"adf": {...}} / {"body": {...}} shapes
+            if isinstance(data, dict):
+                if data.get('type') == 'doc' and 'content' in data:
+                    return data
+                for key in ('adf', 'body', 'value'):
+                    if isinstance(data.get(key), dict) and data[key].get('type') == 'doc':
+                        return data[key]
+            raise ValueError("JSON file does not look like an ADF document")
+        except (json.JSONDecodeError, ValueError) as e:
+            raise ValueError(f"Cannot read {p.name} as ADF JSON: {e}") from e
     else:
         return p.read_text(encoding="utf-8")
+
+def _adf_to_markdown(adf: dict) -> str:
+    """Convert an ADF document to a markdown-like plain text string.
+
+    Preserves heading levels as # markers so that _extract_section() can
+    find and extract named sections from ADF-sourced documents.
+    """
+    lines: list[str] = []
+
+    def walk(node: dict, list_marker: str = ''):
+        ntype = node.get('type', '')
+        children = node.get('content', [])
+
+        if ntype == 'heading':
+            level = node.get('attrs', {}).get('level', 1)
+            text  = _node_text(node).strip()
+            lines.append('#' * level + ' ' + text)
+        elif ntype in ('paragraph', 'tableCell', 'tableHeader'):
+            text = _node_text(node).strip()
+            if text:
+                lines.append(list_marker + text if list_marker else text)
+        elif ntype == 'listItem':
+            # walk items with a bullet marker, passing it down to paragraphs
+            for child in children:
+                walk(child, list_marker='- ')
+            return
+        elif ntype in ('bulletList', 'orderedList'):
+            for child in children:
+                walk(child)
+            return
+        elif ntype == 'rule':
+            lines.append('---')
+        elif ntype == 'panel':
+            text = _node_text(node).strip()
+            if text:
+                lines.append(f'> {text}')
+        elif ntype in ('table', 'tableRow'):
+            for child in children:
+                walk(child)
+            return
+        elif ntype in ('doc', 'blockquote', 'expand'):
+            for child in children:
+                walk(child)
+            return
+        else:
+            # Unknown block — walk children
+            for child in children:
+                walk(child)
+
+    for node in adf.get('content', []):
+        walk(node)
+
+    return '\n'.join(lines)
+
 
 # ---------------------------------------------------------------------------
 # ADF builder
