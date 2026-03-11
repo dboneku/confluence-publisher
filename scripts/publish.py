@@ -4,9 +4,47 @@ Confluence Publisher
 Usage: python publish.py [--mapping mapping.csv] [--file path/or/url] [--dry-run]
 """
 
+# ---------------------------------------------------------------------------
+# Bootstrap — auto-install dependencies into a venv on first run
+# ---------------------------------------------------------------------------
+import subprocess
+import sys
+from pathlib import Path
+
+_VENV = Path(__file__).parent.parent / ".venv"
+_SENTINEL = _VENV / ".deps-installed"
+_REQS = Path(__file__).parent / "requirements.txt"
+
+def _bootstrap():
+    if not _VENV.exists():
+        print("First run: creating virtual environment for dependencies...")
+        subprocess.check_call([sys.executable, "-m", "venv", str(_VENV)])
+
+    venv_python = _VENV / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python3")
+
+    if not _SENTINEL.exists():
+        print("Installing dependencies (one-time setup)...")
+        subprocess.check_call([str(venv_python), "-m", "pip", "install", "-q",
+                               "-r", str(_REQS)])
+        _SENTINEL.touch()
+
+    # Check if we are already running *inside* the venv using sys.prefix —
+    # more reliable than comparing executable paths (both may resolve to the same binary).
+    already_in_venv = Path(sys.prefix).resolve() == _VENV.resolve()
+    if not already_in_venv:
+        result = subprocess.run([str(venv_python)] + sys.argv)
+        sys.exit(result.returncode)
+
+try:
+    import requests          # noqa: F401 — quick check; full import below
+    import dotenv            # noqa: F401
+except ImportError:
+    _bootstrap()
+
+# ---------------------------------------------------------------------------
+
 import os
 import re
-import sys
 import json
 import base64
 import argparse
