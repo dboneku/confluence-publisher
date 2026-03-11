@@ -1,7 +1,7 @@
 ---
 name: confluence-publisher
-description: This skill should be used when the user asks to "publish to Confluence", "upload a document to Confluence", "publish a folder to Confluence", "set up Confluence credentials", "list Confluence spaces", "find a Confluence page", or mentions publishing documents to a Confluence wiki. Handles credential validation, space discovery, page tree scanning, upload planning, collision detection, and publishing via the Confluence Cloud REST API.
-version: 0.1.0
+description: This skill should be used when the user asks to "publish to Confluence", "upload a document to Confluence", "publish a folder to Confluence", "set up Confluence credentials", "list Confluence spaces", "find a Confluence page", "audit Confluence pages", "check Confluence compliance", "remediate Confluence pages", "fix missing sections in Confluence", or mentions publishing, auditing, or remediating documents in a Confluence wiki. Handles credential validation, space discovery, page tree scanning, upload planning, collision detection, publishing, compliance auditing, and ADF remediation via the Confluence Cloud REST API.
+version: 0.2.0
 ---
 
 # Confluence Publisher Skill
@@ -192,3 +192,70 @@ Results: 5 published, 0 skipped, 0 failed
 
 - **`references/api-reference.md`** — full Confluence API reference, endpoint details, known gotchas
 - **`references/templates.md`** — template structures (Policy, Procedure, Form, Checklist, ISO 27001, etc.)
+
+---
+
+## Audit and Remediation (Steps A1–A4)
+
+Use these steps when the user asks to audit or fix existing Confluence pages, not when publishing new content.
+
+### Step A1 — Resolve Scope
+
+Determine what to scan:
+- If `--folder` is set: resolve the folder/page ID via CQL, then use `ancestor={id}` to find all descendant pages
+- If no folder: scan the entire space using `space="{key}" AND type=page`
+
+Use CQL (`/wiki/rest/api/content/search`) — the v2 pages API silently omits folder-type nodes.
+
+### Step A2 — Audit Each Page
+
+For each page:
+1. `GET /wiki/api/v2/pages/{id}?body-format=atlas_doc_format` — fetch ADF body
+2. Extract plain text from ADF using `_extract_text_from_adf()`
+3. `detect_template_from_text(text)` — infer template type
+4. `check_template_sections(adf_content, template)` — find missing required sections
+5. `validate_naming_convention(title, template)` — check the page title against naming pattern
+
+Collect all results before printing anything.
+
+### Step A3 — Report
+
+Print a structured compliance report:
+
+```
+══════════════════════════════════════════════════════════════════════
+Audit report — OHH
+══════════════════════════════════════════════════════════════════════
+  Total pages   : 47
+  ✓  Compliant  : 31
+  ✗  Issues     : 16
+──────────────────────────────────────────────────────────────────────
+Non-compliant pages:
+
+  ACME-POL-003 Information Security Policy
+    Template : policy
+    Missing  : Compliance and Exceptions, Revision History
+
+  HR Onboarding Checklist
+    Template : checklist
+    Missing  : Completion
+    Naming   : expected — ORG-CHK-001 Document Title
+```
+
+### Step A4 — Remediate (if requested)
+
+For each page with missing sections:
+
+1. Fetch ADF (already available from Step A2)
+2. Insert new nodes before `Revision History` heading (or at end if not present):
+   ```json
+   { "type": "heading", "attrs": { "level": 2 }, "content": [{ "type": "text", "text": "Section Name" }] }
+   { "type": "panel", "attrs": { "panelType": "warning" }, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "[TO BE COMPLETED — Section Name]" }] }] }
+   ```
+3. Preserve insertion order from the template's required section list
+4. `PUT /wiki/api/v2/pages/{id}` with version+1 and the patched ADF
+
+**Never auto-fix naming violations** — report them and ask the user to rename in Confluence.
+
+Always show a remediation plan and wait for confirmation before making any changes (unless `--go` is set).
+

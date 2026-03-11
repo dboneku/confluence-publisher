@@ -14,6 +14,8 @@ A Claude Code plugin that converts `.docx` files and Google Docs into properly s
 - **Bulk publishing** — publish an entire folder or zip archive in one command
 - **Upload plan** — always shows what will be published, with compliance warnings, before touching Confluence
 - **doc-lint integration** — if the [doc-lint](https://github.com/dboneku/doc-lint) plugin is installed, uses its full rule set for richer analysis and pre-publish cleanup
+- **Space audit** — scan existing Confluence pages for template compliance and naming convention violations
+- **Auto-remediation** — patch non-compliant pages by inserting missing section placeholders without removing existing content
 
 ## Installation
 
@@ -96,6 +98,26 @@ Unzip an archive and publish all `.docx` files inside it.
 ```
 
 Extracts to a temp directory, publishes, then cleans up automatically.
+
+### `/confluence-publisher:audit <space-key> [--folder "Name"]`
+Scan existing Confluence pages for template compliance. Read-only — nothing is modified.
+
+```
+/confluence-publisher:audit OHH
+/confluence-publisher:audit OHH --folder "HR Policies"
+```
+
+For each page, detects the template, checks for missing required sections, and validates the naming convention. Produces a full compliance report grouped by page.
+
+### `/confluence-publisher:remediate <space-key> [--folder "Name"] [--go]`
+Audit then automatically patch non-compliant pages by inserting warning-panel placeholders for every missing required section.
+
+```
+/confluence-publisher:remediate OHH
+/confluence-publisher:remediate OHH --folder "HR Policies" --go
+```
+
+Shows a remediation plan (which pages, which sections) before making any changes. Missing sections are inserted before `Revision History` (or appended at end) as an H2 heading + yellow warning panel with `[TO BE COMPLETED — Section Name]`. Naming convention violations are reported but require manual renaming in Confluence.
 
 ## How It Works
 

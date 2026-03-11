@@ -931,6 +931,273 @@ def load_mapping(path: str) -> list[dict]:
     return df.to_dict(orient="records")
 
 # ---------------------------------------------------------------------------
+# Confluence audit and remediation
+# ---------------------------------------------------------------------------
+
+def fetch_page_adf(page_id: str) -> tuple:
+    """Fetch a Confluence page and return (adf_body, title)."""
+    r = requests.get(
+        f"{ATLASSIAN_URL}/wiki/api/v2/pages/{page_id}",
+        params={"body-format": "atlas_doc_format"},
+        headers=get_headers(),
+    )
+    r.raise_for_status()
+    data = r.json()
+    title    = data["title"]
+    body_val = data.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
+    return json.loads(body_val), title
+
+
+def walk_descendant_pages(parent_id: str) -> list:
+    """Return all descendant pages under parent_id using CQL ancestor search."""
+    results = []
+    start = 0
+    while True:
+        r = requests.get(
+            f"{ATLASSIAN_URL}/wiki/rest/api/content/search",
+            params={
+                "cql":   f"ancestor={parent_id} AND type=page ORDER BY title",
+                "limit": 100,
+                "start": start,
+            },
+            headers=get_headers(),
+        )
+        r.raise_for_status()
+        data  = r.json()
+        batch = data.get("results", [])
+        results.extend(batch)
+        if not batch or len(results) >= data.get("totalSize", 0):
+            break
+        start += len(batch)
+    return results
+
+
+def walk_space_pages(space_key: str) -> list:
+    """Return all pages in a space using CQL."""
+    results = []
+    start = 0
+    while True:
+        r = requests.get(
+            f"{ATLASSIAN_URL}/wiki/rest/api/content/search",
+            params={
+                "cql":   f'space="{space_key}" AND type=page ORDER BY title',
+                "limit": 100,
+                "start": start,
+            },
+            headers=get_headers(),
+        )
+        r.raise_for_status()
+        data  = r.json()
+        batch = data.get("results", [])
+        results.extend(batch)
+        if not batch or len(results) >= data.get("totalSize", 0):
+            break
+        start += len(batch)
+    return results
+
+
+def remediate_adf(adf: dict, template: str, missing_sections: list) -> dict:
+    """
+    Insert a warning panel + placeholder paragraph for each missing required section.
+    Inserts before 'Revision History' if present; otherwise appends at end.
+    Returns a new ADF dict (does not mutate the input).
+    """
+    import copy
+    new_adf = copy.deepcopy(adf)
+    nodes   = new_adf.setdefault("content", [])
+
+    # Find insertion point — before 'Revision History' if present
+    insert_idx = len(nodes)
+    for i, node in enumerate(nodes):
+        if node.get("type") == "heading":
+            text = "".join(
+                c.get("text", "") for c in node.get("content", [])
+                if c.get("type") == "text"
+            )
+            if "revision history" in text.lower():
+                insert_idx = i
+                break
+
+    # Order missing sections by their position in the template's required order
+    required_order = REQUIRED_SECTIONS.get(template.lower(), [])
+    ordered = [s for s in required_order if s in missing_sections]
+    ordered += [s for s in missing_sections if s not in ordered]  # catch any extras
+
+    new_nodes = []
+    for section in ordered:
+        new_nodes.append(heading(2, section))
+        new_nodes.append({
+            "type": "panel",
+            "attrs": {"panelType": "warning"},
+            "content": [paragraph(f"[TO BE COMPLETED — {section}]")],
+        })
+
+    nodes[insert_idx:insert_idx] = new_nodes
+    return new_adf
+
+
+def run_audit(space_key: str, folder: str = None) -> list:
+    """
+    Scan all pages in a space (or under a named folder/page) and audit each for
+    template compliance, missing required sections, and naming convention.
+    Returns list of audit result dicts.
+    """
+    if folder:
+        parent_id = resolve_parent_id(space_key, folder)
+        print(f"\nScanning '{folder}' in space {space_key}...")
+        pages = walk_descendant_pages(parent_id)
+        # Include the root folder/parent page itself in the audit
+        pages = [{"id": parent_id, "title": folder}] + pages
+    else:
+        print(f"\nScanning entire space {space_key}...")
+        pages = walk_space_pages(space_key)
+
+    if not pages:
+        print("No pages found.")
+        return []
+
+    print(f"Found {len(pages)} page(s). Auditing...\n")
+
+    results = []
+    for i, page in enumerate(pages, 1):
+        page_id    = page["id"]
+        page_title = page.get("title", page_id)
+        # Overwrite line with progress indicator
+        print(f"  [{i:>3}/{len(pages)}] {page_title[:65]:<65}", end="\r", flush=True)
+
+        try:
+            adf, _   = fetch_page_adf(page_id)
+            text     = _extract_text_from_adf(adf.get("content", []))
+            template = detect_template_from_text(text)
+            missing  = check_template_sections(adf["content"], template)
+            name_ok, name_ex = validate_naming_convention(page_title, template)
+            results.append({
+                "id":       page_id,
+                "title":    page_title,
+                "template": template,
+                "missing":  missing,
+                "name_ok":  name_ok,
+                "name_ex":  name_ex,
+                "adf":      adf,
+                "compliant": not missing and name_ok,
+            })
+        except Exception as e:
+            results.append({
+                "id": page_id, "title": page_title, "template": "?",
+                "missing": [], "name_ok": True, "name_ex": "",
+                "adf": None, "compliant": None, "error": str(e),
+            })
+
+    print()  # clear the carriage-return progress line
+    return results
+
+
+def print_audit_report(results: list, space_key: str):
+    """Print a human-readable compliance audit report."""
+    compliant     = [r for r in results if r.get("compliant") is True]
+    non_compliant = [r for r in results if r.get("compliant") is False]
+    errors        = [r for r in results if "error" in r]
+
+    print(f"\n{'='*70}")
+    print(f"Audit report — {space_key}")
+    print(f"{'='*70}")
+    print(f"  Total pages   : {len(results)}")
+    print(f"  ✓  Compliant  : {len(compliant)}")
+    print(f"  ✗  Issues     : {len(non_compliant)}")
+    if errors:
+        print(f"  ⚠  Errors     : {len(errors)}")
+
+    if non_compliant:
+        print(f"\n{'─'*70}")
+        print("Non-compliant pages:")
+        print(f"{'─'*70}")
+        for r in non_compliant:
+            print(f"\n  {r['title']}")
+            print(f"    Template : {r['template']}")
+            if r["missing"]:
+                print(f"    Missing  : {', '.join(r['missing'])}")
+            if not r["name_ok"] and r["name_ex"]:
+                print(f"    Naming   : expected — {r['name_ex']}")
+
+    if errors:
+        print(f"\n{'─'*70}")
+        print("Errors (pages skipped):")
+        for r in errors:
+            print(f"  {r['title']}: {r.get('error', '')}")
+
+    print()
+
+
+def run_remediate(space_key: str, folder: str = None, go: bool = False):
+    """
+    Audit all pages in the space/folder, then patch each non-compliant page
+    by inserting warning-panel placeholders for every missing required section.
+    Naming convention violations are reported but not auto-fixed (require a rename).
+    """
+    results = run_audit(space_key, folder)
+    if not results:
+        return
+
+    print_audit_report(results, space_key)
+
+    # Pages with missing sections — these can be auto-remediated
+    fixable = [
+        r for r in results
+        if r.get("compliant") is False
+        and r["adf"] is not None
+        and r["missing"]
+    ]
+    # Pages with naming violations only — report at end
+    naming_only = [
+        r for r in results
+        if r.get("compliant") is False
+        and not r["missing"]
+        and not r["name_ok"]
+    ]
+
+    if not fixable:
+        print("No missing sections detected — nothing to auto-remediate.")
+    else:
+        print(f"Remediation plan — {len(fixable)} page(s):")
+        print(f"{'─'*70}")
+        for r in fixable:
+            print(f"  {r['title']}")
+            print(f"    Add: {', '.join(r['missing'])}")
+        print()
+
+        if not go:
+            confirm = input(f"Proceed? [y/N] ").strip().lower()
+            if confirm != "y":
+                print("Aborted.")
+                return
+
+        ok = fail = 0
+        for r in fixable:
+            try:
+                new_adf = remediate_adf(r["adf"], r["template"], r["missing"])
+                update_page(r["id"], r["title"], new_adf)
+                print(f"  ✓  {r['title']}")
+                ok += 1
+            except Exception as e:
+                print(f"  ✗  {r['title']} — {e}")
+                fail += 1
+
+        print(f"\nRemediation complete: {ok} updated, {fail} failed")
+
+    # Always report naming violations — these need manual renames
+    naming_issues = [
+        r for r in results
+        if not r.get("name_ok") and r.get("template") not in ("general", "?") and r.get("name_ex")
+    ]
+    if naming_issues:
+        print(f"\nNaming violations (manual rename required — {len(naming_issues)} page(s)):")
+        print(f"{'─'*70}")
+        for r in naming_issues:
+            print(f"  '{r['title']}'  →  expected: {r['name_ex']}")
+        print()
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -1051,11 +1318,30 @@ def main():
     parser.add_argument("--test-auth", action="store_true",
                         help="Test credentials and list spaces, then exit")
     parser.add_argument("--analyze", help="Analyze a file's structure without publishing")
+    parser.add_argument("--audit",     metavar="SPACE_KEY",
+                        help="Audit all pages in a space for template compliance")
+    parser.add_argument("--remediate", metavar="SPACE_KEY",
+                        help="Audit then patch non-compliant pages with placeholder sections")
+    parser.add_argument("--folder",    metavar="FOLDER_NAME",
+                        help="Limit --audit or --remediate to a specific folder (page title)")
+    parser.add_argument("--go", action="store_true",
+                        help="Skip confirmation prompts (for --remediate)")
     args = parser.parse_args()
 
     # Analyze mode — no credentials needed
     if args.analyze:
         analyze_file(args.analyze)
+        return
+
+    # Audit mode
+    if args.audit:
+        results = run_audit(args.audit, folder=args.folder)
+        print_audit_report(results, args.audit)
+        return
+
+    # Remediate mode
+    if args.remediate:
+        run_remediate(args.remediate, folder=args.folder, go=args.go)
         return
 
     # Auth test mode
