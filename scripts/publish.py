@@ -30,6 +30,102 @@ def normalize_title(stem: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Template detection and compliance
+# ---------------------------------------------------------------------------
+
+REQUIRED_SECTIONS = {
+    'policy': [
+        'Purpose', 'Scope', 'Definitions', 'Roles and Responsibilities',
+        'Policy Statements', 'Compliance and Exceptions', 'Related Documents', 'Revision History',
+    ],
+    'procedure': [
+        'Purpose', 'Scope', 'Prerequisites', 'Procedure Steps',
+        'Exceptions and Escalations', 'Related Documents', 'Revision History',
+    ],
+    'workflow': [
+        'Purpose', 'Trigger', 'Roles Involved', 'Flow Steps',
+        'Decision Points', 'Outcomes', 'Related Documents',
+    ],
+    'form':          ['Instructions', 'Fields', 'Submission Guidance'],
+    'checklist':     ['Instructions', 'Checklist Items', 'Completion'],
+    'meeting_minutes': ['Attendees', 'Agenda', 'Decisions', 'Action Items'],
+    'iso27001': [
+        'Purpose', 'Scope', 'Definitions', 'Roles and Responsibilities',
+        'Policy Statements', 'Control Mapping', 'Compliance and Exceptions',
+        'Related Documents', 'Revision History',
+    ],
+}
+
+_NAMING_PATTERNS = {
+    'policy':          (re.compile(r'^[A-Z]+-POL-\d+[\s\-].+', re.I), 'ORG-POL-001 Document Title'),
+    'procedure':       (re.compile(r'^[A-Z]+-PRO-\d+[\s\-].+', re.I), 'ORG-PRO-001 Document Title'),
+    'workflow':        (re.compile(r'^[A-Z]+-WF-\d+[\s\-].+',  re.I), 'ORG-WF-001 Document Title'),
+    'form':            (re.compile(r'^[A-Z]+-FRM-\d+[\s\-].+', re.I), 'ORG-FRM-001 Document Title'),
+    'checklist':       (re.compile(r'^[A-Z]+-CHK-\d+[\s\-].+', re.I), 'ORG-CHK-001 Document Title'),
+    'meeting_minutes': (re.compile(r'^\d{4}-\d{2}-\d{2}.+',    re.I), '2026-01-01 Team Meeting Minutes'),
+    'iso27001':        (re.compile(r'^[A-Z]+-\d+[\s\-].+',     re.I), 'ORG-001-DOMAIN Document Title (Type)'),
+}
+
+
+def detect_template_from_text(text: str) -> str:
+    """Detect document template type from plain text content."""
+    t = text.lower()
+    if any(k in t for k in ['annex a', 'iso 27001', '27001', 'isms']):
+        return 'iso27001'
+    if sum(1 for k in ['purpose', 'scope', 'policy statement', 'shall'] if k in t) >= 3:
+        return 'policy'
+    if sum(1 for k in ['steps', 'procedure', 'prerequisites'] if k in t) >= 2:
+        return 'procedure'
+    if sum(1 for k in ['attendees', 'agenda', 'action items', 'decisions'] if k in t) >= 2:
+        return 'meeting_minutes'
+    if sum(1 for k in ['trigger', 'flow steps', 'decision points'] if k in t) >= 2:
+        return 'workflow'
+    if t.count('☐') >= 5:
+        return 'checklist'
+    if t.count('☐') >= 3 or '___' in t:
+        return 'form'
+    return 'general'
+
+
+def _extract_text_from_adf(nodes: list) -> str:
+    """Recursively extract plain text from ADF node tree."""
+    parts = []
+    for node in nodes:
+        if node.get('type') == 'text':
+            parts.append(node.get('text', ''))
+        child_text = _extract_text_from_adf(node.get('content', []))
+        if child_text:
+            parts.append(child_text)
+    return ' '.join(parts)
+
+
+def check_template_sections(content_nodes: list, template: str) -> list[str]:
+    """Return list of required section names missing from the ADF content."""
+    required = REQUIRED_SECTIONS.get(template.lower(), [])
+    if not required:
+        return []
+    heading_texts = set()
+    for node in content_nodes:
+        if node.get('type') == 'heading':
+            text = ''.join(
+                c.get('text', '') for c in node.get('content', [])
+                if c.get('type') == 'text'
+            )
+            heading_texts.add(text.lower().strip())
+    return [s for s in required if s.lower() not in heading_texts]
+
+
+def validate_naming_convention(stem: str, template: str) -> tuple[bool, str]:
+    """Check filename stem against the expected naming convention for the template.
+    Returns (is_valid, example). is_valid=True also when no convention applies (general)."""
+    entry = _NAMING_PATTERNS.get(template.lower())
+    if entry is None:
+        return True, ''
+    pattern, example = entry
+    return bool(pattern.match(stem)), example
+
+
+# ---------------------------------------------------------------------------
 # doc-lint integration (optional soft dependency)
 # ---------------------------------------------------------------------------
 
@@ -167,14 +263,154 @@ def delete_page(page_id: str):
 # Source ingestion
 # ---------------------------------------------------------------------------
 
-def ingest_google_doc(url: str) -> str:
-    """Export Google Doc as plain text."""
-    import re
+def _google_doc_html_to_adf(html: str) -> dict:
+    """Convert Google Docs HTML export to ADF, preserving headings, lists, tables, and inline marks."""
+    from html.parser import HTMLParser as _HTMLParser
+
+    class _Parser(_HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.nodes = []
+            self._buf   = []      # list of (text, marks[])
+            self._marks = []      # active inline marks stack
+            self._mode  = None    # 'heading' | 'para' | 'li' | 'cell'
+            self._hlevel = None
+            self._lists = []      # stack of ('ul'|'ol', [items])
+            self._table_rows = []
+            self._row_buf = []
+            self._cell_type = 'tableCell'
+
+        def _style_marks(self, style):
+            s = style.lower().replace(' ', '')
+            m = []
+            if 'font-weight:bold' in s or 'font-weight:700' in s:
+                m.append({'type': 'strong'})
+            if 'font-style:italic' in s:
+                m.append({'type': 'em'})
+            if 'text-decoration:underline' in s:
+                m.append({'type': 'underline'})
+            if 'text-decoration:line-through' in s:
+                m.append({'type': 'strike'})
+            return m
+
+        def _flush(self):
+            inline = []
+            for text, marks in self._buf:
+                if not text:
+                    continue
+                node = {'type': 'text', 'text': text}
+                if marks:
+                    node['marks'] = list(marks)
+                inline.append(node)
+            self._buf = []
+            return inline
+
+        def handle_starttag(self, tag, attrs):
+            ad = dict(attrs)
+            if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                self._mode = 'heading'; self._hlevel = int(tag[1]); self._buf = []
+            elif tag == 'p':
+                if self._mode != 'cell':
+                    self._mode = 'para'
+                self._buf = []
+            elif tag in ('ul', 'ol'):
+                self._lists.append((tag, []))
+            elif tag == 'li':
+                self._mode = 'li'; self._buf = []
+            elif tag == 'table':
+                self._table_rows = []
+            elif tag == 'tr':
+                self._row_buf = []
+            elif tag in ('th', 'td'):
+                self._mode = 'cell'
+                self._cell_type = 'tableHeader' if tag == 'th' else 'tableCell'
+                self._buf = []
+            elif tag in ('b', 'strong'):
+                self._marks.append({'type': 'strong'})
+            elif tag in ('i', 'em'):
+                self._marks.append({'type': 'em'})
+            elif tag == 'u':
+                self._marks.append({'type': 'underline'})
+            elif tag in ('s', 'strike'):
+                self._marks.append({'type': 'strike'})
+            elif tag == 'span':
+                for m in self._style_marks(ad.get('style', '')):
+                    self._marks.append(m)
+
+        def handle_endtag(self, tag):
+            if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                inline = self._flush()
+                if inline:
+                    self.nodes.append({'type': 'heading', 'attrs': {'level': self._hlevel}, 'content': inline})
+                self._mode = None
+            elif tag == 'p' and self._mode == 'para':
+                inline = self._flush()
+                if inline:
+                    self.nodes.append({'type': 'paragraph', 'content': inline})
+                self._mode = None
+            elif tag == 'li':
+                inline = self._flush()
+                if inline and self._lists:
+                    self._lists[-1][1].append({
+                        'type': 'listItem',
+                        'content': [{'type': 'paragraph', 'content': inline}],
+                    })
+                self._mode = None
+            elif tag in ('ul', 'ol'):
+                if self._lists:
+                    ltype, items = self._lists.pop()
+                    if items:
+                        ntype = 'orderedList' if ltype == 'ol' else 'bulletList'
+                        self.nodes.append({'type': ntype, 'content': items})
+            elif tag in ('th', 'td'):
+                inline = self._flush()
+                self._row_buf.append({
+                    'type': self._cell_type, 'attrs': {},
+                    'content': [{'type': 'paragraph', 'content': inline}],
+                })
+                self._mode = None
+            elif tag == 'tr':
+                if self._row_buf:
+                    self._table_rows.append({'type': 'tableRow', 'content': self._row_buf})
+                self._row_buf = []
+            elif tag == 'table':
+                if self._table_rows:
+                    self.nodes.append({
+                        'type': 'table',
+                        'attrs': {'isNumberColumnEnabled': False, 'layout': 'default'},
+                        'content': self._table_rows,
+                    })
+            elif tag in ('b', 'strong', 'i', 'em', 'u', 's', 'strike', 'span'):
+                target = {
+                    'b': 'strong', 'strong': 'strong', 'i': 'em', 'em': 'em',
+                    'u': 'underline', 's': 'strike', 'strike': 'strike',
+                }.get(tag)
+                for i in range(len(self._marks) - 1, -1, -1):
+                    if target and self._marks[i].get('type') == target:
+                        self._marks.pop(i)
+                        break
+                    elif tag == 'span':
+                        break  # pop the last mark added by this span
+
+        def handle_data(self, data):
+            if self._mode in ('heading', 'para', 'li', 'cell') and data:
+                self._buf.append((data, list(self._marks)))
+
+    parser = _Parser()
+    parser.feed(html)
+    return {'version': 1, 'type': 'doc', 'content': [n for n in parser.nodes if n]}
+
+
+def ingest_google_doc(url: str) -> dict:
+    """Export Google Doc as HTML and convert to ADF, preserving headings, lists, tables, and inline marks."""
     match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", url)
     if not match:
         raise ValueError(f"Cannot extract doc ID from URL: {url}")
     doc_id = match.group(1)
-    export_url = f"https://docs.google.com/feeds/download/documents/export/Export?id={doc_id}&exportFormat=txt"
+    export_url = (
+        f"https://docs.google.com/feeds/download/documents/export/Export"
+        f"?id={doc_id}&exportFormat=html"
+    )
     r = requests.get(export_url)
     if r.status_code == 403:
         raise PermissionError(
@@ -183,7 +419,7 @@ def ingest_google_doc(url: str) -> str:
             f"URL: {url}"
         )
     r.raise_for_status()
-    return r.text
+    return _google_doc_html_to_adf(r.text)
 
 
 def docx_to_adf(path: str) -> dict:
@@ -700,82 +936,102 @@ def load_mapping(path: str) -> list[dict]:
 
 def analyze_file(source: str):
     """Run structural analysis on a file and print a report. No publishing."""
-    from docx import Document
-    from docx.oxml.ns import qn
-
-    def _para_size(para):
-        for run in para.runs:
-            if run.font.size: return run.font.size.pt
-        return None
-
-    def _heading_level(para):
-        style = para.style.name
-        size  = _para_size(para)
-        if style == 'Title': return 1
-        if 'Heading 1' in style: return 2 if (size is None or size >= 13) else None
-        if 'Heading 2' in style: return 3
-        if 'Heading 3' in style: return 4
-        if style in ('Normal', 'Normal (Web)'):
-            if size and size >= 18: return 1
-            if size and size >= 13: return 2
-        return None
-
     p = Path(source)
-    doc = Document(str(p))
-    issues = []
-    headings = paras = lists = 0
-    consec = 0
-    prev_heading = False
-    misuse = 0
 
-    for para in doc.paragraphs:
-        if not para.text.strip(): continue
-        pPr = para._element.find(qn('w:pPr'))
-        numPr = pPr.find(qn('w:numPr')) if pPr is not None else None
-        if numPr is not None:
-            lists += 1
-            prev_heading = False
-            consec = 0
-            continue
-        lvl = _heading_level(para)
-        style = para.style.name
-        size  = _para_size(para)
-        if 'Heading 1' in style and size and size < 13:
-            misuse += 1
-        if lvl:
-            headings += 1
-            consec += 1
-            if consec >= 3:
-                issues.append(f'⚠  Consecutive headings: "{para.text.strip()[:50]}" is heading #{consec} in a row')
-        else:
-            paras += 1
-            consec = 0
-
-    if misuse:
-        issues.append(f'⚠  Style misuse: {misuse} "Heading 1" paragraphs at ≤12pt — reclassify as body text')
-
-    # Template detection
-    text = ' '.join(p.text.lower() for p in doc.paragraphs)
-    template = 'General'
-    if any(k in text for k in ['annex a', 'iso', '27001', 'isms']):
-        template = 'ISO 27001'
-    elif sum(1 for k in ['purpose','scope','policy statement','shall'] if k in text) >= 3:
-        template = 'Policy'
-    elif sum(1 for k in ['steps','procedure','prerequisites'] if k in text) >= 2:
-        template = 'Procedure'
-    elif text.count('☐') >= 3:
-        template = 'Form' if 'signature' in text or 'consent' in text else 'Checklist'
-
-    print(f"\nAnalysis: {source}")
-    print("─" * 60)
-    print(f"Template (auto-detected): {template}")
-    print(f"Structure: {headings} headings, {paras} paragraphs, {lists} list items, {len(doc.tables)} tables")
-    if issues:
-        print(f"\nIssues ({len(issues)}):")
-        for issue in issues:
-            print(f"  {issue}")
+    # Delegate structural checks to doc-lint when available (richer output)
+    lint_py, _ = get_doc_lint()
+    if lint_py and p.suffix.lower() == '.docx':
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(lint_py), '--file', str(p)],
+            capture_output=True, text=True,
+        )
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
     else:
-        print("\nIssues: none")
+        # Built-in fallback checks
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        def _para_size(para):
+            for run in para.runs:
+                if run.font.size: return run.font.size.pt
+            return None
+
+        def _heading_level(para):
+            style = para.style.name
+            size  = _para_size(para)
+            if style == 'Title': return 1
+            if 'Heading 1' in style: return 2 if (size is None or size >= 13) else None
+            if 'Heading 2' in style: return 3
+            if 'Heading 3' in style: return 4
+            if style in ('Normal', 'Normal (Web)'):
+                if size and size >= 18: return 1
+                if size and size >= 13: return 2
+            return None
+
+        doc = Document(str(p))
+        issues = []
+        headings = paras = lists = 0
+        consec = 0
+        misuse = 0
+
+        for para in doc.paragraphs:
+            if not para.text.strip(): continue
+            pPr = para._element.find(qn('w:pPr'))
+            numPr = pPr.find(qn('w:numPr')) if pPr is not None else None
+            if numPr is not None:
+                lists += 1; consec = 0; continue
+            lvl = _heading_level(para)
+            style = para.style.name
+            size  = _para_size(para)
+            if 'Heading 1' in style and size and size < 13:
+                misuse += 1
+            if lvl:
+                headings += 1; consec += 1
+                if consec >= 3:
+                    issues.append(f'⚠  Consecutive headings: "{para.text.strip()[:50]}" is heading #{consec} in a row')
+            else:
+                paras += 1; consec = 0
+
+        if misuse:
+            issues.append(f'⚠  Style misuse: {misuse} "Heading 1" paragraphs at ≤12pt — reclassify as body text')
+
+        print(f"\nAnalysis: {source}")
+        print("─" * 60)
+        print(f"Structure: {headings} headings, {paras} paragraphs, {lists} list items, {len(doc.tables)} tables")
+        if issues:
+            print(f"\nIssues ({len(issues)}):")
+            for issue in issues:
+                print(f"  {issue}")
+        else:
+            print("\nIssues: none")
+
+    # Template detection and compliance (always runs)
+    if p.suffix.lower() == '.docx':
+        from docx import Document
+        doc = Document(str(p))
+        source_text = ' '.join(para.text for para in doc.paragraphs)
+        adf = docx_to_adf(str(p))
+    else:
+        source_text = p.read_text(encoding='utf-8')
+        adf = to_adf(source_text)
+
+    detected_template = detect_template_from_text(source_text)
+    missing_sections  = check_template_sections(adf['content'], detected_template)
+    name_valid, name_example = validate_naming_convention(p.stem, detected_template)
+
+    print(f"\nTemplate (auto-detected): {detected_template}")
+    if missing_sections:
+        print(f"Missing required sections ({len(missing_sections)}): {', '.join(missing_sections)}")
+    else:
+        print("Required sections: all present ✓")
+    if not name_valid:
+        print(f"⚠  Naming: '{p.stem}' doesn't match {detected_template} convention (expected: {name_example})")
+    elif name_example:
+        print(f"Naming convention: ✓")
     print(f"\nTo publish: python3 publish.py --file \"{source}\" --space SPACE --parent \"Parent\"")
 
 
@@ -839,9 +1095,23 @@ def main():
             sys.exit(1)
         print(f"Ingesting: {args.file}")
         content = ingest_file(args.file)
-        # docx returns ADF directly; other formats return plain text
+        # docx and Google Docs return ADF directly; other formats return plain text
         adf = content if isinstance(content, dict) else to_adf(content, args.template)
         json.loads(json.dumps(adf))  # validate
+
+        # Template detection and compliance checks
+        source_text = _extract_text_from_adf(adf.get('content', []))
+        detected_template = detect_template_from_text(source_text) if args.template == 'general' else args.template
+        missing_sections  = check_template_sections(adf['content'], detected_template)
+        name_valid, name_example = validate_naming_convention(Path(args.file).stem, detected_template)
+
+        if not name_valid or missing_sections:
+            print(f"\nCompliance warnings (template: {detected_template}):")
+            if not name_valid:
+                print(f"  \u26a0  Naming convention: '{Path(args.file).stem}' does not match expected pattern")
+                print(f"     Expected format: {name_example}")
+            for s in missing_sections:
+                print(f"  \u26a0  Missing required section: '{s}'")
 
         title = args.title or normalize_title(Path(args.file).stem)
         labels = [l.strip() for l in args.labels.split(",")] if args.labels else []
@@ -917,6 +1187,16 @@ def main():
                 content = ingest_file(source)
                 adf = content if isinstance(content, dict) else to_adf(content, template)
                 json.loads(json.dumps(adf))  # validate
+
+                # Template detection and compliance checks
+                source_text = _extract_text_from_adf(adf.get('content', []))
+                detected_tmpl = detect_template_from_text(source_text) if template == 'general' else template
+                missing_sections = check_template_sections(adf['content'], detected_tmpl)
+                name_valid, name_example = validate_naming_convention(Path(source).stem, detected_tmpl)
+                if not name_valid:
+                    print(f"  \u26a0  Naming: '{Path(source).stem}' doesn't match {detected_tmpl} pattern ({name_example})")
+                for s in missing_sections:
+                    print(f"  \u26a0  Missing section: '{s}'")
 
                 # Apply naming convention if title blank
                 title = row.get("title", "").strip() or normalize_title(Path(source).stem)
