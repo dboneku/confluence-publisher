@@ -137,6 +137,222 @@ def save_regulation_config(cfg: dict):
     cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Style policy — load / save / check
+# ---------------------------------------------------------------------------
+
+_STYLE_POLICY_FILE = ".style-policy.md"
+
+
+def load_style_policy() -> tuple[str | None, dict]:
+    """Return (policy_text, metadata) from .style-policy.md in cwd, or (None, {})."""
+    p = Path(os.getcwd()) / _STYLE_POLICY_FILE
+    if not p.exists():
+        return None, {}
+    raw = p.read_text(encoding='utf-8')
+    meta: dict = {}
+    body = raw
+    if raw.startswith('---'):
+        end = raw.find('\n---', 3)
+        if end != -1:
+            for line in raw[3:end].splitlines():
+                m = re.match(r'^\s*(\w+)\s*:\s*(.+)', line)
+                if m:
+                    meta[m.group(1)] = m.group(2).strip().strip('"\'')
+            body = raw[end + 4:].lstrip('\n')
+    return body, meta
+
+
+def save_style_policy(policy_text: str, source: str, section: str | None = None):
+    """Write .style-policy.md with YAML frontmatter and record metadata in .confluence-config.json."""
+    from datetime import date as _date
+    fm_lines = [f'source: "{source}"', f'set_date: "{_date.today().isoformat()}"']
+    if section:
+        fm_lines.append(f'section: "{section}"')
+    content = '---\n' + '\n'.join(fm_lines) + '\n---\n\n' + policy_text
+    p = Path(os.getcwd()) / _STYLE_POLICY_FILE
+    p.write_text(content, encoding='utf-8')
+    cfg = load_regulation_config()
+    cfg['style_policy'] = {
+        'file': _STYLE_POLICY_FILE,
+        'source': source,
+        'section': section,
+        'set_date': _date.today().isoformat(),
+    }
+    save_regulation_config(cfg)
+    print(f"\nStyle policy saved to {_STYLE_POLICY_FILE}")
+    print(f"  Source:  {source}" + (f"  →  section \"{section}\"" if section else ""))
+
+
+def _page_id_from_url(url: str) -> str | None:
+    """Extract numeric Confluence page ID from a URL like .../pages/123456/..."""
+    m = re.search(r'/pages/(\d+)', url)
+    return m.group(1) if m else None
+
+
+def _extract_section(text: str, section_heading: str) -> str:
+    """Extract a named section from plain text or markdown.
+
+    Finds the first heading line that contains `section_heading` (case-insensitive,
+    ignoring leading # chars) and returns everything up to the next heading of
+    equal or higher level.  Returns the full text when the section is not found.
+    """
+    lines = text.splitlines()
+    heading_re = re.compile(r'^(#{1,6})\s+(.+)')
+    target = section_heading.strip().lower()
+    start_idx = None
+    start_level = 1
+
+    for i, line in enumerate(lines):
+        m = heading_re.match(line)
+        text_part = m.group(2).strip().lower() if m else line.strip().lower()
+        if target in text_part or text_part in target:
+            start_idx = i
+            start_level = len(m.group(1)) if m else 1
+            break
+
+    if start_idx is None:
+        return text  # section not found — return everything
+
+    result = [lines[start_idx]]
+    for line in lines[start_idx + 1:]:
+        m = heading_re.match(line)
+        if m and len(m.group(1)) <= start_level:
+            break
+        result.append(line)
+    return '\n'.join(result)
+
+
+def _extract_required_headings_from_policy(policy_text: str) -> list[str]:
+    """Parse a style policy text and return detected required section/heading names."""
+    required: list[str] = []
+    lines = policy_text.splitlines()
+    in_block = False
+
+    _trigger_re = re.compile(
+        r'required.{0,30}section|must include|must contain|required heading'
+        r'|all documents.{0,30}(?:must|shall).{0,30}(?:include|contain|have)',
+        re.IGNORECASE,
+    )
+    _inline_re = re.compile(
+        r'(?:required.{0,30}:|headings[:：]|sections[:：])\s*(.+)', re.IGNORECASE
+    )
+    _item_re = re.compile(r'^[\s\-\*•\d\.]+(.+)')
+
+    for line in lines:
+        s = line.strip()
+        # Inline pattern: "Required sections: Purpose, Scope, Policy Statements"
+        m = _inline_re.search(s)
+        if m:
+            for part in re.split(r'[,;/]', m.group(1)):
+                name = part.strip(' ."\'')
+                if 2 <= len(name.split()) <= 6:
+                    required.append(name)
+            in_block = False
+            continue
+        # Trigger block extraction
+        if _trigger_re.search(s):
+            in_block = True
+            continue
+        if in_block:
+            if not s:
+                continue
+            mi = _item_re.match(s)
+            if mi:
+                name = mi.group(1).strip(' ."\'')
+                if 1 <= len(name.split()) <= 7:
+                    required.append(name)
+            elif s.startswith('#') or (s and s[0] not in '-*•0123456789'):
+                in_block = False
+
+    return list(dict.fromkeys(required))   # deduplicate, preserve order
+
+
+def check_adf_against_style_policy(adf: dict, policy_text: str) -> list[str]:
+    """Return warning strings for required headings that are absent in the ADF."""
+    required = _extract_required_headings_from_policy(policy_text)
+    if not required:
+        return []
+    heading_texts = {
+        _node_text(n).lower().strip()
+        for n in adf.get('content', [])
+        if n.get('type') == 'heading'
+    }
+    return [
+        f'Style policy: missing required section "{req}"'
+        for req in required
+        if not any(req.lower() in h or h in req.lower() for h in heading_texts)
+    ]
+
+
+def run_set_policy(source: str, section: str | None = None):
+    """Load a style policy from a local file or Confluence page URL/ID and save it."""
+    print(f"\nLoading style policy from: {source}")
+    if section:
+        print(f"Extracting section: \"{section}\"")
+
+    is_confluence_url = source.startswith('http')
+    is_page_id = source.isdigit()
+
+    if is_confluence_url or is_page_id:
+        page_id = _page_id_from_url(source) if is_confluence_url else source
+        if not page_id:
+            print("ERROR: Could not extract page ID from URL.")
+            print("  Expected: https://your-domain.atlassian.net/wiki/spaces/.../pages/123456/...")
+            sys.exit(1)
+        print(f"  Fetching Confluence page {page_id} ...")
+        adf_body, page_title = fetch_page_adf(page_id)
+        policy_text = _node_text(adf_body)
+        source_desc = page_title
+    else:
+        path = Path(source)
+        if not path.exists():
+            print(f"ERROR: File not found: {source}")
+            sys.exit(1)
+        ingested = ingest_file(source)
+        policy_text = _node_text(ingested) if isinstance(ingested, dict) else ingested
+        source_desc = path.name
+
+    if section:
+        policy_text = _extract_section(policy_text, section)
+
+    if not policy_text.strip():
+        print("ERROR: No policy content found (empty after extraction).")
+        sys.exit(1)
+
+    # Preview
+    preview = policy_text.strip().splitlines()
+    print(f"\n── Preview ({'first 20 lines' if len(preview) > 20 else f'{len(preview)} lines'}) ──")
+    for line in preview[:20]:
+        print(f"  {line}")
+    if len(preview) > 20:
+        print(f"  ... ({len(preview) - 20} more lines not shown)")
+
+    required = _extract_required_headings_from_policy(policy_text)
+    if required:
+        print(f"\n  Detected required sections ({len(required)}):")
+        for r in required:
+            print(f"    \u2022 {r}")
+    else:
+        print(
+            "\n  \u2139  No structured required-section list detected.\n"
+            "     Policy will be stored and Claude will apply it as contextual guidance."
+        )
+
+    print()
+    confirm = input("Save as project style policy? [y/N] ").strip().lower()
+    if confirm != 'y':
+        print("Aborted.")
+        return
+
+    save_style_policy(policy_text, source=source_desc, section=section)
+    print(
+        f"\n\u2713 Policy active. Every document published or linted will be checked against it.\n"
+        f"  View:  cat {_STYLE_POLICY_FILE}\n"
+        f"  Clear: delete {_STYLE_POLICY_FILE}"
+    )
+
+
 def _normalize_tokens(text: str) -> set:
     """Lowercase, strip punctuation, remove common stop words — return set of tokens."""
     stop = {'the', 'of', 'and', 'a', 'an', 'in', 'for', 'to', 'with', 'on', 'at',
@@ -258,6 +474,116 @@ def fix_adf_heading_numbers(adf: dict) -> tuple[dict, int]:
             first_text['text'] = new_prefix + first_text['text'][len(old_prefix):]
             changes += 1
     return result, changes
+
+
+# ---------------------------------------------------------------------------
+# Document control header / print footer
+# ---------------------------------------------------------------------------
+
+def _node_text(node: dict) -> str:
+    """Recursively collect all plain text from an ADF node."""
+    if node.get('type') == 'text':
+        return node.get('text', '')
+    return ''.join(_node_text(c) for c in node.get('content', []))
+
+
+_DOC_ID_PAT = re.compile(
+    r'^((?:[A-Z]{2,6}-[A-Z]{2,6}-\d{2,4})(?:\s+\d{2,3}-[A-Z]+)?)\s+',
+    re.IGNORECASE,
+)
+
+
+def extract_doc_id_from_title(title: str) -> str | None:
+    """Return the document ID prefix from a title like 'OHH-POL-001 02-ISMS Information Security Policy'."""
+    m = _DOC_ID_PAT.match(title)
+    return m.group(1).strip() if m else None
+
+
+def build_doc_control_header(
+    title: str,
+    doc_id: str = None,
+    version: str = '1.0',
+    approved_date: str = None,
+    classification: str = 'Internal',
+) -> list[dict]:
+    """Return ADF nodes for the document control header table."""
+    from datetime import date as _date
+    approved = approved_date or _date.today().isoformat()
+    return [
+        metadata_table([
+            ('Document Title',  title),
+            ('Document ID',     doc_id or '\u2014'),
+            ('Version',         version),
+            ('Status',          'Current'),
+            ('Classification',  classification),
+            ('Approved Date',   approved),
+        ])
+    ]
+
+
+def build_doc_control_footer(
+    title: str,
+    doc_id: str = None,
+    version: str = '1.0',
+) -> list[dict]:
+    """Return ADF nodes for the UNCONTROLLED WHEN PRINTED warning footer."""
+    id_str = f'{doc_id}  ' if doc_id else ''
+    msg = (
+        f'\u26a0  UNCONTROLLED WHEN PRINTED  \u2014  {id_str}{title}  v{version}.  '
+        'The print date and page numbers are supplied by your browser or PDF viewer.  '
+        'Verify this is the current approved version before use.'
+    )
+    return [{'type': 'rule'}, info_panel(msg, 'warning')]
+
+
+def _has_doc_control_header(adf: dict) -> bool:
+    """Return True if the ADF already contains a document control header table."""
+    for node in adf.get('content', [])[:3]:
+        if node.get('type') == 'table' and 'Document Title' in _node_text(node):
+            return True
+    return False
+
+
+def _strip_doc_control_blocks(adf: dict) -> dict:
+    """Remove existing doc control header (table + rule) and footer (rule + panel) if present."""
+    import copy
+    result = copy.deepcopy(adf)
+    nodes = result.get('content', [])
+    # Strip header table and its trailing divider rule
+    if nodes and nodes[0].get('type') == 'table':
+        if 'Document Title' in _node_text(nodes[0]):
+            nodes.pop(0)
+            if nodes and nodes[0].get('type') == 'rule':
+                nodes.pop(0)
+    # Strip footer panel and its leading divider rule
+    if nodes and nodes[-1].get('type') == 'panel':
+        if 'UNCONTROLLED WHEN PRINTED' in _node_text(nodes[-1]):
+            nodes.pop()
+            if nodes and nodes[-1].get('type') == 'rule':
+                nodes.pop()
+    result['content'] = nodes
+    return result
+
+
+def wrap_with_print_controls(
+    adf: dict,
+    title: str,
+    doc_id: str = None,
+    version: str = '1.0',
+    approved_date: str = None,
+    classification: str = 'Internal',
+) -> dict:
+    """Inject document control header and 'Uncontrolled when printed' footer into ADF.
+
+    Idempotent: strips any existing blocks before re-inserting, so overwrite
+    publishes never stack duplicate headers/footers.
+    """
+    clean = _strip_doc_control_blocks(adf)
+    header = build_doc_control_header(title, doc_id, version, approved_date, classification)
+    footer = build_doc_control_footer(title, doc_id, version)
+    result = dict(clean)
+    result['content'] = header + [{'type': 'rule'}] + clean.get('content', []) + footer
+    return result
 
 
 def detect_template_from_text(text: str) -> str:
@@ -1518,6 +1844,55 @@ def run_fix_heading_numbers(space_key: str, folder: str = None, go: bool = False
     print(f"\nDone: {ok} fixed, {fail} failed")
 
 
+def run_add_print_headers(space_key: str, folder: str = None, go: bool = False):
+    """Add document control header and print footer to pages that are missing them."""
+    print(f"\nScanning for pages without document control blocks in {space_key}" +
+          (f" / '{folder}'" if folder else "") + " ...")
+
+    if folder:
+        parent_id = resolve_parent_id(space_key, folder)
+        pages = walk_descendant_pages(parent_id)
+    else:
+        pages = walk_space_pages(space_key)
+
+    plan = []
+    for page in pages:
+        adf, title = fetch_page_adf(page['id'])
+        if _has_doc_control_header(adf):
+            continue
+        doc_id = extract_doc_id_from_title(title)
+        new_adf = wrap_with_print_controls(adf, title, doc_id=doc_id)
+        plan.append({'page_id': page['id'], 'title': title, 'new_adf': new_adf})
+
+    if not plan:
+        print("\n\u2713 All pages already have document control blocks.")
+        return
+
+    print(f"\nFix plan \u2014 {len(plan)} page(s) missing document control header/footer:\n")
+    print("\u2500" * 60)
+    for p in plan:
+        print(f"  {p['title']}")
+    print()
+
+    if not go:
+        confirm = input("Proceed? [y/N] ").strip().lower()
+        if confirm != 'y':
+            print("Aborted.")
+            return
+
+    ok, fail = 0, 0
+    for p in plan:
+        try:
+            update_page(p['page_id'], p['title'], p['new_adf'])
+            print(f"  \u2713  {p['title']}")
+            ok += 1
+        except Exception as e:
+            print(f"  \u2717  {p['title']}: {e}")
+            fail += 1
+
+    print(f"\nDone: {ok} updated, {fail} failed")
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -1659,6 +2034,12 @@ def main():
                         help="List the document catalog for a regulation and exit")
     parser.add_argument("--fix-heading-numbers",   metavar="SPACE_KEY",
                         help="Scan and fix restarting numbered headings in existing Confluence pages")
+    parser.add_argument("--add-print-headers",      metavar="SPACE_KEY",
+                        help="Add document control header and print footer to pages that are missing them")
+    parser.add_argument("--set-policy",            metavar="SOURCE",
+                        help="Load formatting rules from a local file or Confluence page URL/ID and save as project style policy")
+    parser.add_argument("--policy-section",        metavar="SECTION",
+                        help="Extract only a named section from the policy source, e.g. 'Appendix A'")
     args = parser.parse_args()
 
     # Set regulation mode
@@ -1702,6 +2083,16 @@ def main():
     # Fix heading numbers mode
     if args.fix_heading_numbers:
         run_fix_heading_numbers(args.fix_heading_numbers, folder=args.folder, go=args.go)
+        return
+
+    # Add print headers mode
+    if args.add_print_headers:
+        run_add_print_headers(args.add_print_headers, folder=args.folder, go=args.go)
+        return
+
+    # Set style policy mode (local files don't need Confluence credentials)
+    if args.set_policy:
+        run_set_policy(args.set_policy, section=args.policy_section)
         return
 
     # Analyze mode — no credentials needed
@@ -1853,6 +2244,16 @@ def main():
         if heading_fixes:
             print(f"  Renumbered {heading_fixes} heading(s) for sequential continuity")
 
+        # Wrap with document control header and 'Uncontrolled when printed' footer
+        doc_id = extract_doc_id_from_title(title)
+        adf = wrap_with_print_controls(adf, title, doc_id=doc_id)
+
+        # Check against active style policy
+        policy_text, _ = load_style_policy()
+        if policy_text:
+            for w in check_adf_against_style_policy(adf, policy_text):
+                print(f"  \u26a0  {w}")
+
         labels = [l.strip() for l in args.labels.split(",")] if args.labels else []
 
         print(f"\nUpload plan:")
@@ -1952,6 +2353,15 @@ def main():
                 adf, heading_fixes = fix_adf_heading_numbers(adf)
                 if heading_fixes:
                     print(f"  Renumbered {heading_fixes} heading(s) for sequential continuity")
+                # Document control header and print footer
+                doc_id = extract_doc_id_from_title(title)
+                adf = wrap_with_print_controls(adf, title, doc_id=doc_id)
+
+                # Check against active style policy
+                policy_text, _ = load_style_policy()
+                if policy_text:
+                    for w in check_adf_against_style_policy(adf, policy_text):
+                        print(f"  \u26a0  {w}")
 
                 space_id = resolve_space_id(space_key)
                 parent_id = resolve_parent_id(space_id, parent_title) if parent_title else None

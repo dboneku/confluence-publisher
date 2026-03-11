@@ -69,6 +69,15 @@ COMPLIANCE & CLEANUP
     Remove the active regulation. Document IDs will no longer be
     injected into titles.
 
+  /confluence-publisher:setpolicy <source> [--section "Appendix A"]
+    Load formatting and style rules from a local file or Confluence page
+    (or a named section within one) and save them as the project style policy.
+    Once saved, every publish and doc-lint run will enforce these rules.
+    Supported sources: .docx, .md, .txt, .pdf, Confluence page URL or page ID.
+    Example: /confluence-publisher:setpolicy ./standards/doc-standards.docx
+    Example: /confluence-publisher:setpolicy https://...atlassian.net/.../pages/123456/Title --section "Appendix A"
+    Example: /confluence-publisher:setpolicy 123456 --section "Formatting Rules"
+
   /confluence-publisher:audit [SPACE_KEY] [--folder "Name"]
     Scan pages in a space (or folder) for template compliance.
     Read-only — nothing is modified.
@@ -88,6 +97,15 @@ COMPLIANCE & CLEANUP
     Shows a plan and asks for confirmation unless --go is passed.
     Example: /confluence-publisher:fixheadingnumbers
     Example: /confluence-publisher:fixheadingnumbers OHH --folder "Policies" --go
+
+  /confluence-publisher:addprintheaders [SPACE_KEY] [--folder "Name"] [--go]
+    Add a document control header table (Title, Doc ID, Version, Status,
+    Classification, Approved Date) and an "UNCONTROLLED WHEN PRINTED" footer
+    to pages that are missing them. All new publishes include these blocks
+    automatically; this command patches pages already in Confluence.
+    Print date and page numbers are supplied by the browser / PDF export.
+    Example: /confluence-publisher:addprintheaders
+    Example: /confluence-publisher:addprintheaders OHH --folder "Policies" --go
 
   /confluence-publisher:analyze <file>
     Analyze a local file's structure, detected template, and compliance
