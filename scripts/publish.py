@@ -68,6 +68,197 @@ _NAMING_PATTERNS = {
     'iso27001':        (re.compile(r'^[A-Z]+-\d+[\s\-].+',     re.I), 'ORG-001-DOMAIN Document Title (Type)'),
 }
 
+# ---------------------------------------------------------------------------
+# Regulation catalog
+# ---------------------------------------------------------------------------
+
+# ISO 27001:2022 mandatory and recommended document catalog.
+# Keys are the organization's document IDs (NN-ISMS format).
+# Values are the canonical document names used for fuzzy title matching.
+ISO27001_DOCS = {
+    "00-ISMS": "Master List of Documents",
+    "01-ISMS": "Scope of the ISMS",
+    "02-ISMS": "Information Security Policy",
+    "03-ISMS": "Information Security Risk Assessment Process",
+    "04-ISMS": "Information Security Risk Treatment Plan",
+    "05-ISMS": "Statement of Applicability",
+    "06-ISMS": "Information Security Objectives",
+    "07-ISMS": "Competence and Training Records",
+    "08-ISMS": "Monitoring Measurement Analysis and Evaluation",
+    "09-ISMS": "Internal Audit Program",
+    "10-ISMS": "Internal Audit Results",
+    "11-ISMS": "Management Review Results",
+    "12-ISMS": "Nonconformities and Corrective Actions",
+    "13-ISMS": "Asset Inventory",
+    "14-ISMS": "Acceptable Use of Information and Assets Policy",
+    "15-ISMS": "Information Classification Policy",
+    "16-ISMS": "Access Control Policy",
+    "17-ISMS": "Identity Management Policy",
+    "18-ISMS": "Supplier Security Policy",
+    "19-ISMS": "Incident Response Plan",
+    "20-ISMS": "Business Continuity Plan",
+    "21-ISMS": "Cryptography Policy",
+    "22-ISMS": "Clear Desk and Clear Screen Policy",
+    "23-ISMS": "Remote Working Policy",
+    "24-ISMS": "Change Management Policy",
+    "25-ISMS": "Secure Development Policy",
+    "26-ISMS": "Vulnerability Management Policy",
+    "27-ISMS": "Network Security Policy",
+    "28-ISMS": "Log Management Policy",
+    "29-ISMS": "Configuration Management Policy",
+    "30-ISMS": "Data Retention and Disposal Policy",
+}
+
+REGULATION_CONFIGS = {
+    "iso27001": {
+        "name":     "ISO/IEC 27001:2022",
+        "doc_id_suffix": "ISMS",
+        "docs":     ISO27001_DOCS,
+    },
+}
+
+_REGULATION_CONFIG_FILE = ".confluence-config.json"
+
+
+def load_regulation_config() -> dict:
+    """Load regulation config from .confluence-config.json in cwd."""
+    cfg_path = Path(os.getcwd()) / _REGULATION_CONFIG_FILE
+    if cfg_path.exists():
+        try:
+            return json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_regulation_config(cfg: dict):
+    """Write regulation config to .confluence-config.json in cwd."""
+    cfg_path = Path(os.getcwd()) / _REGULATION_CONFIG_FILE
+    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _normalize_tokens(text: str) -> set:
+    """Lowercase, strip punctuation, remove common stop words — return set of tokens."""
+    stop = {'the', 'of', 'and', 'a', 'an', 'in', 'for', 'to', 'with', 'on', 'at',
+            'by', 'or', 'is', 'its', 'their', 'rec', 'pol', 'pro', 'wf', 'chk'}
+    return {w for w in re.sub(r'[^\w\s]', '', text.lower()).split() if w not in stop}
+
+
+def fuzzy_doc_match(title: str, regulation: str) -> tuple[str | None, float]:
+    """Fuzzy-match a page title against a regulation's document catalog.
+
+    Returns (doc_id, score) where score is Jaccard similarity in [0, 1].
+    Returns (None, 0.0) if no match exceeds the threshold.
+    """
+    catalog = REGULATION_CONFIGS.get(regulation, {}).get('docs', {})
+    title_tokens = _normalize_tokens(title)
+    best_id, best_score = None, 0.0
+    for doc_id, doc_name in catalog.items():
+        doc_tokens = _normalize_tokens(doc_name)
+        if not title_tokens or not doc_tokens:
+            continue
+        intersection = title_tokens & doc_tokens
+        union = title_tokens | doc_tokens
+        score = len(intersection) / len(union) if union else 0.0
+        if score > best_score:
+            best_score = score
+            best_id = doc_id
+    if best_score >= 0.35:
+        return best_id, best_score
+    return None, 0.0
+
+
+def inject_regulation_doc_id(title: str, regulation: str | None) -> str:
+    """If the title closely matches a regulation document, insert its doc ID.
+
+    e.g. 'OHH-POL-001 Information Security Policy' + iso27001 match on 02-ISMS
+    →    'OHH-POL-001 02-ISMS Information Security Policy'
+    """
+    if not regulation:
+        return title
+    doc_id, score = fuzzy_doc_match(title, regulation)
+    if not doc_id:
+        return title
+    # Insert doc_id between the org-number prefix and the text portion if present
+    m = re.match(r'^([A-Z0-9]+-[A-Z0-9]+-\d+)\s+(.+)$', title, re.I)
+    if m:
+        return f"{m.group(1)} {doc_id} {m.group(2)}"
+    # Fallback: prepend doc_id
+    return f"{doc_id} {title}"
+
+
+def strip_title_heading_from_adf(adf: dict, title: str) -> dict:
+    """Remove the first ADF node if it is a heading that closely matches the page title.
+
+    Confluence puts the title in a discrete field; repeating it as an H1 creates
+    a redundant heading at the top of the page body.
+    """
+    import copy
+    nodes = adf.get('content', [])
+    if not nodes:
+        return adf
+    first = nodes[0]
+    if first.get('type') != 'heading':
+        return adf
+    heading_text = ''.join(
+        c.get('text', '') for c in first.get('content', []) if c.get('type') == 'text'
+    )
+    title_tokens   = _normalize_tokens(title)
+    heading_tokens = _normalize_tokens(heading_text)
+    if not title_tokens or not heading_tokens:
+        return adf
+    intersection = title_tokens & heading_tokens
+    union        = title_tokens | heading_tokens
+    score = len(intersection) / len(union) if union else 0.0
+    if score >= 0.5:
+        result = copy.deepcopy(adf)
+        result['content'] = result['content'][1:]
+        return result
+    return adf
+
+
+def fix_adf_heading_numbers(adf: dict) -> tuple[dict, int]:
+    """Renumber heading nodes in ADF where numbered prefixes restart at the same level.
+
+    Detects heading nodes whose text begins with 'N. ' and ensures numbering is
+    sequential at each heading level.  When a higher-level heading is encountered,
+    sub-level counters are reset (so H3 numbering restarts under each H2).
+
+    Returns (updated_adf, change_count).  The original dict is not mutated.
+    """
+    import copy
+    numbered_pat = re.compile(r'^(\d+)\.\s+')
+    counters: dict[int, int] = {}  # heading level -> current sequential count
+    changes = 0
+
+    result = copy.deepcopy(adf)
+    for node in result.get('content', []):
+        if node.get('type') != 'heading':
+            continue
+        level = node.get('attrs', {}).get('level', 1)
+        # Reset counters for all sub-levels when a higher-level heading appears
+        for k in list(counters.keys()):
+            if k > level:
+                del counters[k]
+        # Find the first text node in the heading content
+        first_text = next(
+            (c for c in node.get('content', []) if c.get('type') == 'text'), None
+        )
+        if not first_text:
+            continue
+        m = numbered_pat.match(first_text.get('text', ''))
+        if not m:
+            continue
+        original_num = int(m.group(1))
+        counters[level] = counters.get(level, 0) + 1
+        expected_num = counters[level]
+        if original_num != expected_num:
+            old_prefix = m.group(0)          # full matched prefix, e.g. '1. '
+            new_prefix = f'{expected_num}. '
+            first_text['text'] = new_prefix + first_text['text'][len(old_prefix):]
+            changes += 1
+    return result, changes
+
 
 def detect_template_from_text(text: str) -> str:
     """Detect document template type from plain text content."""
@@ -1278,6 +1469,55 @@ def run_remediate(space_key: str, folder: str = None, go: bool = False):
         print()
 
 
+def run_fix_heading_numbers(space_key: str, folder: str = None, go: bool = False):
+    """Scan all pages in a space (or folder) for restarting numbered headings and fix them."""
+    print(f"\nScanning for numbered heading restarts in {space_key}" +
+          (f" / '{folder}'" if folder else "") + " ...")
+
+    if folder:
+        parent_id = resolve_parent_id(space_key, folder)
+        pages = walk_descendant_pages(parent_id)
+    else:
+        pages = walk_space_pages(space_key)
+
+    plan = []  # list of {page_id, title, count, new_adf}
+    for page in pages:
+        adf, title = fetch_page_adf(page['id'])
+        fixed_adf, count = fix_adf_heading_numbers(adf)
+        if count > 0:
+            plan.append({'page_id': page['id'], 'title': title,
+                         'count': count, 'new_adf': fixed_adf})
+
+    if not plan:
+        print("\n\u2713 No numbered heading restarts found.")
+        return
+
+    print(f"\nFix plan \u2014 {len(plan)} page(s) with restarting numbered headings:\n")
+    print("\u2500" * 60)
+    for p in plan:
+        print(f"  {p['title']}")
+        print(f"    {p['count']} heading(s) renumbered")
+    print()
+
+    if not go:
+        confirm = input("Proceed? [y/N] ").strip().lower()
+        if confirm != 'y':
+            print("Aborted.")
+            return
+
+    ok, fail = 0, 0
+    for p in plan:
+        try:
+            update_page(p['page_id'], p['title'], p['new_adf'])
+            print(f"  \u2713  {p['title']}")
+            ok += 1
+        except Exception as e:
+            print(f"  \u2717  {p['title']}: {e}")
+            fail += 1
+
+    print(f"\nDone: {ok} fixed, {fail} failed")
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -1407,11 +1647,62 @@ def main():
                         help="Limit --audit, --remediate, or --tree to a specific folder")
     parser.add_argument("--go",          action="store_true",
                         help="Skip confirmation prompts (for --remediate)")
-    parser.add_argument("--list-spaces", action="store_true",
+    parser.add_argument("--list-spaces",          action="store_true",
                         help="List all Confluence spaces and exit")
-    parser.add_argument("--tree",        metavar="SPACE_KEY",
+    parser.add_argument("--tree",                  metavar="SPACE_KEY",
                         help="Print the full page/folder tree for a space and exit")
+    parser.add_argument("--set-regulation",        metavar="REGULATION",
+                        help="Set active regulation (e.g. iso27001) and save to .confluence-config.json")
+    parser.add_argument("--clear-regulation",      action="store_true",
+                        help="Remove the active regulation from .confluence-config.json")
+    parser.add_argument("--list-regulation-docs",  metavar="REGULATION",
+                        help="List the document catalog for a regulation and exit")
+    parser.add_argument("--fix-heading-numbers",   metavar="SPACE_KEY",
+                        help="Scan and fix restarting numbered headings in existing Confluence pages")
     args = parser.parse_args()
+
+    # Set regulation mode
+    if args.set_regulation:
+        key = args.set_regulation.lower().replace('/', '').replace(' ', '')
+        if key not in REGULATION_CONFIGS:
+            print(f"Unknown regulation '{key}'. Available: {', '.join(REGULATION_CONFIGS.keys())}")
+            sys.exit(1)
+        cfg = load_regulation_config()
+        cfg['regulation']  = key
+        cfg['set_date']    = __import__('datetime').date.today().isoformat()
+        save_regulation_config(cfg)
+        print(f"Active regulation set to: {REGULATION_CONFIGS[key]['name']}")
+        print(f"Config saved to: {_REGULATION_CONFIG_FILE}")
+        return
+
+    # Clear regulation mode
+    if args.clear_regulation:
+        cfg = load_regulation_config()
+        cfg.pop('regulation', None)
+        cfg.pop('set_date', None)
+        save_regulation_config(cfg)
+        print("Regulation cleared.")
+        return
+
+    # List regulation docs
+    if args.list_regulation_docs:
+        key = args.list_regulation_docs.lower().replace('/', '').replace(' ', '')
+        reg = REGULATION_CONFIGS.get(key)
+        if not reg:
+            print(f"Unknown regulation '{key}'. Available: {', '.join(REGULATION_CONFIGS.keys())}")
+            sys.exit(1)
+        print(f"\n{reg['name']} — Document Catalog ({len(reg['docs'])} documents)\n")
+        print(f"  {'ID':<12}  Document Name")
+        print(f"  {'─'*12}  {'─'*50}")
+        for doc_id, doc_name in reg['docs'].items():
+            print(f"  {doc_id:<12}  {doc_name}")
+        print()
+        return
+
+    # Fix heading numbers mode
+    if args.fix_heading_numbers:
+        run_fix_heading_numbers(args.fix_heading_numbers, folder=args.folder, go=args.go)
+        return
 
     # Analyze mode — no credentials needed
     if args.analyze:
@@ -1544,6 +1835,24 @@ def main():
                 print(f"  \u26a0  Missing required section: '{s}'")
 
         title = args.title or normalize_title(Path(args.file).stem)
+
+        # Apply regulation document ID injection (if regulation is active)
+        reg_cfg    = load_regulation_config()
+        regulation = reg_cfg.get('regulation')
+        if regulation:
+            new_title = inject_regulation_doc_id(title, regulation)
+            if new_title != title:
+                print(f"[{REGULATION_CONFIGS[regulation]['name']}] Title updated: {title} → {new_title}")
+                title = new_title
+
+        # Strip leading title heading from ADF body (title lives in the Confluence title field)
+        adf = strip_title_heading_from_adf(adf, title)
+
+        # Fix any restarting numbered headings (e.g. '1. Purpose' … '1. Policy Statements')
+        adf, heading_fixes = fix_adf_heading_numbers(adf)
+        if heading_fixes:
+            print(f"  Renumbered {heading_fixes} heading(s) for sequential continuity")
+
         labels = [l.strip() for l in args.labels.split(",")] if args.labels else []
 
         print(f"\nUpload plan:")
@@ -1630,6 +1939,19 @@ def main():
 
                 # Apply naming convention if title blank
                 title = row.get("title", "").strip() or normalize_title(Path(source).stem)
+
+                # Regulation doc ID injection + title heading strip
+                reg_cfg    = load_regulation_config()
+                regulation = reg_cfg.get('regulation')
+                if regulation:
+                    new_title = inject_regulation_doc_id(title, regulation)
+                    if new_title != title:
+                        print(f"  [{REGULATION_CONFIGS[regulation]['name']}] Title: {title} → {new_title}")
+                        title = new_title
+                adf = strip_title_heading_from_adf(adf, title)
+                adf, heading_fixes = fix_adf_heading_numbers(adf)
+                if heading_fixes:
+                    print(f"  Renumbered {heading_fixes} heading(s) for sequential continuity")
 
                 space_id = resolve_space_id(space_key)
                 parent_id = resolve_parent_id(space_id, parent_title) if parent_title else None

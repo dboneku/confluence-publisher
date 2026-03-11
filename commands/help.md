@@ -58,6 +58,17 @@ PUBLISHING
 
 COMPLIANCE & CLEANUP
 ──────────────────────────────────────────────────────────────────────
+  /confluence-publisher:setregulation [REGULATION]
+    Set the active regulation framework (e.g. iso27001). Saves to
+    .confluence-config.json and persists across sessions.
+    When set, document IDs are auto-injected into page titles when
+    the title closely matches a required regulation document name.
+    Example: /confluence-publisher:setregulation iso27001
+
+  /confluence-publisher:clearregulation
+    Remove the active regulation. Document IDs will no longer be
+    injected into titles.
+
   /confluence-publisher:audit [SPACE_KEY] [--folder "Name"]
     Scan pages in a space (or folder) for template compliance.
     Read-only — nothing is modified.
@@ -69,6 +80,14 @@ COMPLIANCE & CLEANUP
     Shows a plan and asks for confirmation unless --go is passed.
     Example: /confluence-publisher:remediate
     Example: /confluence-publisher:remediate OHH --go
+
+  /confluence-publisher:fixheadingnumbers [SPACE_KEY] [--folder "Name"] [--go]
+    Scan existing pages for numbered headings that restart mid-document
+    (e.g. "1. Purpose" … "2. Scope" … "1. Policy Statements") and renumber
+    them so each level is sequential within its parent heading.
+    Shows a plan and asks for confirmation unless --go is passed.
+    Example: /confluence-publisher:fixheadingnumbers
+    Example: /confluence-publisher:fixheadingnumbers OHH --folder "Policies" --go
 
   /confluence-publisher:analyze <file>
     Analyze a local file's structure, detected template, and compliance
@@ -84,8 +103,10 @@ SESSION STATE
 ──────────────────────────────────────────────────────────────────────
   ACTIVE_SPACE    Set by /selectspace — used as default for all commands
   ACTIVE_FOLDER   Set by /cd — used as default --folder for all commands
+  ACTIVE_REGULATION  Set by /setregulation — applied to all publish operations
   
-  Both reset when you start a new conversation.
+  ACTIVE_SPACE and ACTIVE_FOLDER reset when you start a new conversation.
+  ACTIVE_REGULATION persists via .confluence-config.json across sessions.
 ```
 
 After printing, ask: "What would you like to do?"

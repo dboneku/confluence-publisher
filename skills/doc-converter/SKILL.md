@@ -1,7 +1,7 @@
 ---
 name: doc-converter
-description: This skill should be used when the user asks to "convert a document", "upload a document", "publish a document to Confluence", "convert a Word doc", "convert a Google Doc", "process a .docx file", "upload a spreadsheet", "upload an Excel file", "upload a Google Sheet", "upload a PDF", or mentions converting documents to ADF, markdown, or HTML. Handles structural analysis, formatting cleanup, template detection, and conversion of .docx, Google Docs, Excel, Google Sheets, and PDFs to Confluence pages.
-version: 0.2.0
+description: This skill should be used when the user asks to "convert a document", "upload a document", "publish a document to Confluence", "convert a Word doc", "convert a Google Doc", "process a .docx file", "upload a spreadsheet", "upload an Excel file", "upload a Google Sheet", "upload a PDF", or mentions converting documents to ADF, markdown, or HTML. Handles structural analysis, formatting cleanup, template detection, title heading stripping (Confluence shows title separately), and conversion of .docx, Google Docs, Excel, Google Sheets, and PDFs to Confluence pages.
+version: 0.3.0
 ---
 
 # Document Converter Skill
@@ -173,6 +173,7 @@ Apply all cleanup rules before building the output. Full rules in `references/cl
 - **Numbered heading continuity** — if headings include manual Arabic numbers (e.g. "1. Purpose"), detect any level where the sequence restarts mid-document and renumber to be continuous. Hierarchical sub-numbering that resets per parent (1.1, 1.2 → 2.1, 2.2) is correct and must not be changed.
 - **Template compliance** — after detecting the template, compare the document's headings against the required sections list. Report any missing required sections before publishing.
 - **Naming convention** — check the source filename against the expected pattern for the detected template (e.g. `ORG-POL-NNN Title` for Policy). Report if the filename doesn't match. See `references/templates.md` for all patterns.
+- **Title heading stripping** — Confluence stores the page title in a discrete title field; the document body should not repeat it as an H1. After the final page title is determined (including any regulation doc ID insertion), remove the first heading node from the ADF if it closely matches the title (Jaccard similarity ≥ 0.5). This is handled automatically by `publish.py`'s `strip_title_heading_from_adf()` — no manual action needed.
 
 ---
 

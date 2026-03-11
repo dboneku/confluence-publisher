@@ -1,7 +1,7 @@
 ---
 name: confluence-publisher
-description: This skill should be used when the user asks to "publish to Confluence", "upload a document to Confluence", "publish a folder to Confluence", "set up Confluence credentials", "list Confluence spaces", "select a space", "show the page tree", "navigate to a folder", "find a Confluence page", "audit Confluence pages", "check Confluence compliance", "remediate Confluence pages", "fix missing sections in Confluence", or mentions publishing, auditing, remediating, or navigating documents in a Confluence wiki. Handles credential validation, space discovery, space/folder navigation (selectspace, cd), page tree visualization, upload planning, collision detection, publishing, compliance auditing, and ADF remediation via the Confluence Cloud REST API.
-version: 0.3.0
+description: This skill should be used when the user asks to "publish to Confluence", "upload a document to Confluence", "publish a folder to Confluence", "set up Confluence credentials", "list Confluence spaces", "select a space", "show the page tree", "navigate to a folder", "find a Confluence page", "audit Confluence pages", "check Confluence compliance", "remediate Confluence pages", "fix missing sections in Confluence", "set a regulation", "ISO 27001", "regulatory framework", or mentions publishing, auditing, remediating, or navigating documents in a Confluence wiki. Handles credential validation, space discovery, space/folder navigation (selectspace, cd), page tree visualization, regulation context (ISO 27001 document catalog, title doc-ID injection), upload planning, collision detection, publishing, compliance auditing, and ADF remediation via the Confluence Cloud REST API.
+version: 0.4.0
 ---
 
 # Confluence Publisher Skill
@@ -34,7 +34,32 @@ claude plugin install https://github.com/dboneku/doc-lint
 
 ---
 
-## Step 1 — Validate Credentials
+## Step 1 — Check Regulation Context
+
+Before doing anything else, check `.confluence-config.json` in the working directory:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/publish.py" --list-regulation-docs iso27001
+```
+
+If a `regulation` key is present, load that regulation's document catalog into session memory as `REGULATION_DOCS`.
+
+If no regulation is set, ask the user once:
+```
+Are you working under a specific regulatory framework? (e.g. ISO 27001)
+  1. ISO 27001  2. None / skip
+```
+If they choose a regulation, run `/confluence-publisher:setregulation iso27001` to save it.
+
+**When a regulation is active during publishing:**
+- `publish.py` automatically fuzzy-matches the document title against the regulation's document catalog
+- If a match is found (Jaccard similarity ≥ 0.35), the document ID is inserted into the page title:
+  `OHH-POL-001 Information Security Policy` → `OHH-POL-001 02-ISMS Information Security Policy`
+- The first heading in the document body is stripped if it closely matches the page title (≥ 0.5 similarity), since Confluence shows the title separately in the page header
+
+---
+
+## Step 2 — Validate Credentials
 
 Load credentials from `.env` in the working directory:
 
@@ -50,44 +75,27 @@ Test credentials with a quick spaces API call before proceeding.
 
 ---
 
-## Step 2 — Discover Spaces and Build Full Tree (SESSION_TREE)
+## Step 3 — Discover Spaces and Build Full Tree (SESSION_TREE)
 
-On first use in a session, fetch all spaces and their complete page/folder hierarchy. Cache as `SESSION_TREE` — do not re-fetch during the session.
+On first use in a session, fetch all spaces and their complete page/folder hierarchy using the CLI (never call the Confluence API directly):
 
-```python
-# All spaces (no type filter — captures knowledge_base, collaboration, global, personal)
-GET /wiki/api/v2/spaces?limit=250
-
-# Full tree via CQL — MUST use CQL, not v2 pages API (v2 silently omits folders)
-GET /wiki/rest/api/content/search?cql=space="{key}"&limit=200
-GET /wiki/rest/api/content/search?cql=parent={id}&limit=200  # per node
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/publish.py" --list-spaces
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/publish.py" --tree {SPACE_KEY}
 ```
 
-Present summary:
-```
-Spaces loaded (9 total):
-  OHH   — Oversite Health - HR           (312 pages, 4 folders)
-  OHAL  — Oversite Health - Legal        (47 pages)
-  ...
-```
-
-See `references/api-reference.md` for full API details and known gotchas (folder detection, type filters).
+Cache as `SESSION_SPACES` and `SESSION_TREE`. Do not re-fetch during the session.
 
 ---
 
-## Step 3 — Select Target Space and Parent
+## Step 4 — Select Target Space and Parent
 
 Ask the user to select a space (or confirm if already specified). Then ask where in the space to publish:
 
 - Space root
 - Under a named parent page or folder
 
-Resolve parent using `SESSION_TREE` first (no API call needed). If not found in tree, use CQL:
-```python
-GET /wiki/rest/api/content/search?cql=space="{key}" AND title="{title}"&limit=5
-```
-
-If still not found: report and ask user to confirm exact title.
+Resolve parent using `SESSION_TREE` first (no API call needed). If not found in tree, re-run `--tree` to refresh. If still not found: report and ask user to confirm exact title.
 
 **Important:** Confluence folders are type `folder` and only discoverable via CQL — never via the v2 pages API.
 
