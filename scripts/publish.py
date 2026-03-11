@@ -14,7 +14,9 @@ import requests
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# load_dotenv() with no args calls find_dotenv(), which crashes when the script
+# is run from stdin (heredoc). Explicitly load from cwd where .env lives.
+load_dotenv(Path(os.getcwd()) / '.env')
 
 # ---------------------------------------------------------------------------
 # Config
