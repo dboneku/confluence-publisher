@@ -1,0 +1,9 @@
+{
+  "name": "confluence-publisher",
+  "version": "0.1.0",
+  "description": "Convert .docx files and Google Docs into properly structured Confluence pages with structural analysis, formatting cleanup, and direct publishing via the Confluence Cloud REST API.",
+  "author": {
+    "name": "dboneku",
+    "url": "https://github.com/dboneku/confluence-publisher"
+  }
+}

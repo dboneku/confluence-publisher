@@ -1,0 +1,6 @@
+requests
+python-dotenv
+python-docx
+pdfplumber
+pandas
+openpyxl

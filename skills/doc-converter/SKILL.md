@@ -1,0 +1,141 @@
+---
+name: doc-converter
+description: This skill should be used when the user asks to "convert a document", "upload a document", "publish a document to Confluence", "convert a Word doc", "convert a Google Doc", "process a .docx file", or mentions converting documents to ADF, markdown, or HTML. Handles structural analysis, formatting cleanup, template detection, and conversion of .docx and Google Docs to structured output formats.
+version: 0.1.0
+---
+
+# Document Converter Skill
+
+Convert `.docx` files and Google Docs into structured output (Confluence ADF, Markdown, or HTML) with a consistent analysis-first workflow, formatting cleanup, and template auto-detection.
+
+---
+
+## Step 1 — Confirm Output Format
+
+Before doing anything else, ask the user what the desired output is:
+
+```
+Output options:
+1. Confluence ADF  — publish directly to a Confluence space (default)
+2. Markdown        — output a .md file
+3. HTML            — output an .html file
+```
+
+If the user has already stated the target (e.g. "publish to Confluence"), skip this step.
+
+---
+
+## Step 2 — Ingest the Source
+
+**For `.docx`:**
+Use `docx_to_adf()` from `publish.py` — do not use plain-text extraction. This function preserves styles, runs, lists, and tables.
+
+**For Google Docs:**
+Export as HTML (not plain text) to preserve heading levels and inline formatting:
+```
+https://docs.google.com/feeds/download/documents/export/Export?id={DOC_ID}&exportFormat=html
+```
+Parse the HTML to extract heading levels (`h1`–`h6`), paragraphs, lists (`ul`/`ol`), and tables. See `references/style-mapping.md` for the HTML → ADF mapping.
+
+---
+
+## Step 3 — Structural Analysis
+
+Run analysis before converting. Report findings to the user before proceeding.
+
+### Checks to perform
+
+| Check | Flag if... |
+|---|---|
+| Consecutive headings | More than 2 headings in a row with no body content between them |
+| Empty sections | A heading is followed immediately by the next heading (no content at all) |
+| Heading level skips | e.g. H1 → H3 with no H2 in between |
+| Style misuse | Word "Heading 1" style used at body-text size (≤12pt) |
+| Single-item lists | A list with only one item (should be a paragraph) |
+| Roman numeral lists | Ordered lists using I/II/III or a/b/c instead of 1/2/3 |
+| Non-standard font sizes | Any size outside the standardized scale (see `references/cleanup-rules.md`) |
+| Mixed fonts | More than one font family used for body text |
+| Orphaned bold/italic | Entire paragraphs in bold or italic (usually means they should be headings) |
+
+### Output format
+
+```
+Analysis complete — 3 issues found:
+  ⚠ Consecutive headings: lines 12–14 (3 headings, no body text between them)
+  ⚠ Style misuse: "Heading 1" used at 11pt on 6 paragraphs — reclassified as body text
+  ℹ Roman numeral list detected on lines 34–38 — will normalize to 1/2/3
+Proceed with cleanup and conversion? [y/n]
+```
+
+Wait for confirmation before continuing.
+
+---
+
+## Step 4 — Auto-Detect Template
+
+Scan the document content for keywords to determine the Confluence template. Apply the first match:
+
+| Template | Signal keywords / patterns |
+|---|---|
+| Policy | "purpose", "scope", "policy statement", "compliance", "shall" |
+| Procedure | "steps", "procedure", "prerequisites", "how to", numbered step list |
+| Form | Checkbox characters (☐ ✓), fill-in blanks (`___`), "signature", "date:" |
+| Checklist | Majority of content is checkbox items (☐), short lines |
+| Meeting Minutes | "attendees", "agenda", "action items", "decisions", date in title |
+| ISO 27001 | "ISO", "annex A", "27001", "ISMS", control identifiers (A.x.x) |
+| General | No clear match |
+
+If two templates score equally, or if the match is weak, ask:
+
+```
+Best guess: Policy — does that look right, or should I use a different template?
+1. Policy  2. Procedure  3. Form  4. Checklist  5. Meeting Minutes  6. ISO 27001  7. General
+```
+
+---
+
+## Step 5 — Apply Cleanup Rules
+
+Apply all cleanup rules before building the output. Full rules in `references/cleanup-rules.md`. Summary:
+
+- **Consecutive headings** — insert a placeholder paragraph `[Section content pending]` between headings if there are 3+ in a row with nothing between them. Flag for user review.
+- **Style misuse** — reclassify `Heading 1` paragraphs at ≤12pt as body paragraphs.
+- **Font sizes** — normalize to the standard scale (H1=20pt, H2=16pt, H3=14pt, H4=12pt, body=11pt). Do not change heading *level*, only the rendered size mapping.
+- **Fonts** — standardize body text font to the document's declared default. Flag mixed fonts in headers.
+- **List numbering** — convert Roman numerals (I/II/III) and alphabetic lists (a/b/c) to Arabic numerals (1/2/3).
+- **Single-item lists** — convert to a plain paragraph.
+- **Orphaned bold paragraphs** — if an entire paragraph is bold and follows a heading pattern, offer to promote it to a heading.
+
+---
+
+## Step 6 — Convert to Target Format
+
+Use the style → ADF/Markdown/HTML mappings in `references/style-mapping.md`.
+
+For ADF output, use `docx_to_adf()` in `publish.py` as the base, then apply cleanup on top of the returned ADF node tree. Validate ADF as parseable JSON before publishing.
+
+For Markdown or HTML output, follow the mappings in `references/style-mapping.md` and write the output file to the same directory as the source with the appropriate extension.
+
+---
+
+## Step 7 — Report
+
+After conversion, always report:
+
+```
+Conversion complete
+  Source:    1090-OHH-POL-Applicant Screening Policy.docx
+  Output:    Confluence ADF → published to OHH / Hiring
+  Template:  Policy (auto-detected)
+  Cleanup:   3 issues fixed, 0 flagged for review
+  Nodes:     52 (8 headings, 31 paragraphs, 6 list items, 2 tables)
+  URL:       https://oversite-health.atlassian.net/wiki/...
+```
+
+---
+
+## Additional Resources
+
+- **`references/cleanup-rules.md`** — full cleanup rules with decision tables and examples
+- **`references/style-mapping.md`** — Word style / Google Docs HTML → ADF / Markdown / HTML mapping tables
+- **`references/adf-reference.md`** — ADF node type reference for building and validating output
