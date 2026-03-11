@@ -143,13 +143,17 @@ def get_page_version(page_id: str) -> int:
 
 
 def list_child_pages(parent_id: str) -> list[dict]:
-    r = requests.get(
-        f"{ATLASSIAN_URL}/wiki/api/v2/pages/{parent_id}/children",
-        params={"limit": 50},
-        headers=get_headers(),
-    )
-    r.raise_for_status()
-    return r.json().get("results", [])
+    results = []
+    url = f"{ATLASSIAN_URL}/wiki/api/v2/pages/{parent_id}/children"
+    params: dict = {"limit": 250}
+    while url:
+        r = requests.get(url, params=params, headers=get_headers())
+        r.raise_for_status()
+        data = r.json()
+        results.extend(data.get("results", []))
+        url = data.get("_links", {}).get("next")
+        params = {}  # cursor is embedded in the next URL
+    return results
 
 
 def delete_page(page_id: str):
@@ -182,17 +186,6 @@ def ingest_google_doc(url: str) -> str:
     return r.text
 
 
-def ingest_docx(path: str) -> str:
-    """Plain-text fallback — used only by non-docx paths. docx uses docx_to_adf directly."""
-    try:
-        from docx import Document
-    except ImportError:
-        os.system("pip install python-docx -q")
-        from docx import Document
-    doc = Document(path)
-    return "\n".join(p.text for p in doc.paragraphs)
-
-
 def docx_to_adf(path: str) -> dict:
     """Convert a .docx file directly to ADF, preserving headings, lists, tables, and inline formatting."""
     try:
@@ -201,11 +194,7 @@ def docx_to_adf(path: str) -> dict:
         from docx.text.paragraph import Paragraph
         from docx.table import Table as DTable
     except ImportError:
-        os.system("pip install python-docx -q")
-        from docx import Document
-        from docx.oxml.ns import qn as _qn
-        from docx.text.paragraph import Paragraph
-        from docx.table import Table as DTable
+        raise ImportError("python-docx not installed. Run: pip install -r requirements.txt")
 
     doc = Document(path)
 
@@ -326,7 +315,7 @@ def docx_to_adf(path: str) -> dict:
         return nodes
 
     def _consecutive_headings_to_lists(nodes):
-        """Convert runs of 2+ consecutive same-level headings (level >= 3) to bullet lists."""
+        """Convert runs of 3+ consecutive same-level headings (level >= 3) to bullet lists."""
         result = []
         i = 0
         while i < len(nodes):
@@ -341,7 +330,7 @@ def docx_to_adf(path: str) -> dict:
             while j < len(nodes) and nodes[j]['type'] == 'heading' and nodes[j]['attrs']['level'] == level:
                 run.append(nodes[j])
                 j += 1
-            if len(run) >= 2:
+            if len(run) >= 3:
                 items = [{'type': 'listItem', 'content': [{'type': 'paragraph', 'content': h['content']}]}
                          for h in run]
                 result.append({'type': 'bulletList', 'content': items})
@@ -443,8 +432,7 @@ def ingest_pdf(path: str) -> str:
     try:
         import pdfplumber
     except ImportError:
-        os.system("pip install pdfplumber -q")   
-        import pdfplumber
+        raise ImportError("pdfplumber not installed. Run: pip install -r requirements.txt")
     with pdfplumber.open(path) as pdf:
         return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
@@ -689,8 +677,7 @@ def load_mapping(path: str) -> list[dict]:
     try:
         import pandas as pd
     except ImportError:
-        os.system("pip install pandas openpyxl -q") 
-        import pandas as pd
+        raise ImportError("pandas not installed. Run: pip install -r requirements.txt")
 
     ext = Path(path).suffix.lower()
     if ext in (".xlsx", ".xls"):
