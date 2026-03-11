@@ -46,6 +46,7 @@ except ImportError:
 import os
 import re
 import json
+import copy
 import base64
 import argparse
 import requests
@@ -477,7 +478,6 @@ def fix_adf_heading_numbers(adf: dict) -> tuple[dict, int]:
 
     Returns (updated_adf, count_stripped).  The original dict is not mutated.
     """
-    import copy
     numbered_pat = re.compile(r'^\d+\.\s+')
     changes = 0
 
@@ -626,6 +626,206 @@ def wrap_with_print_controls(
     result = dict(clean)
     result['content'] = header + clean.get('content', []) + footer
     return result
+
+
+# ---------------------------------------------------------------------------
+# ADF diff (skip unchanged pages on update)
+# ---------------------------------------------------------------------------
+
+def diff_adf(old_adf: dict, new_adf: dict) -> tuple[bool, list[str]]:
+    """Compare two ADF dicts, ignoring doc-control wrapper blocks.
+
+    Returns (changed: bool, summary_lines: list[str]).
+    summary_lines describes what changed at the heading/section level.
+    """
+    def body_nodes(adf):
+        stripped = _strip_doc_control_blocks(copy.deepcopy(adf))
+        return stripped.get('content', [])
+
+    old_nodes = body_nodes(old_adf)
+    new_nodes = body_nodes(new_adf)
+
+    old_sigs = [json.dumps(n, sort_keys=True) for n in old_nodes]
+    new_sigs  = [json.dumps(n, sort_keys=True) for n in new_nodes]
+    if old_sigs == new_sigs:
+        return False, []
+
+    old_headings = {_node_text(n).strip() for n in old_nodes if n.get('type') == 'heading'}
+    new_headings  = {_node_text(n).strip() for n in new_nodes if n.get('type') == 'heading'}
+    added   = new_headings - old_headings
+    removed = old_headings - new_headings
+
+    summary = []
+    if added:
+        summary.append(f"  + sections added:   {', '.join(sorted(added))}")
+    if removed:
+        summary.append(f"  - sections removed: {', '.join(sorted(removed))}")
+    if not added and not removed:
+        summary.append("  ~ text content modified")
+    return True, summary
+
+
+# ---------------------------------------------------------------------------
+# ADF → HTML preview renderer
+# ---------------------------------------------------------------------------
+
+def adf_to_html(adf: dict, title: str = '') -> str:
+    """Render an ADF document to a standalone HTML string for local preview."""
+    CSS = """
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+           max-width: 960px; margin: 40px auto; padding: 0 20px; color: #172b4d; line-height: 1.6; }
+    h1 { font-size: 1.8em; border-bottom: 2px solid #dfe1e6; padding-bottom: 8px; margin-top: 32px; }
+    h2 { font-size: 1.4em; border-bottom: 1px solid #dfe1e6; padding-bottom: 4px; margin-top: 28px; }
+    h3, h4, h5, h6 { font-size: 1.1em; margin-top: 20px; }
+    p { margin: 10px 0; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+    th { background: #f4f5f7; font-weight: 600; }
+    th, td { border: 1px solid #dfe1e6; padding: 8px 12px; text-align: left; vertical-align: top; }
+    ul, ol { padding-left: 24px; margin: 8px 0; }
+    li { margin: 4px 0; }
+    .panel { border-radius: 4px; padding: 12px 16px; margin: 16px 0; border-left: 4px solid; }
+    .panel-info    { background: #e9f2ff; border-color: #0052cc; }
+    .panel-warning { background: #fffae6; border-color: #ff8b00; }
+    .panel-note    { background: #e3fcef; border-color: #00875a; }
+    .panel-error   { background: #ffebe6; border-color: #de350b; }
+    .panel-success { background: #e3fcef; border-color: #00875a; }
+    .panel-title   { font-weight: 600; margin-bottom: 6px; }
+    hr { border: none; border-top: 2px solid #dfe1e6; margin: 24px 0; }
+    code { background: #f4f5f7; padding: 2px 5px; border-radius: 3px; font-family: monospace; font-size: 0.9em; }
+    pre  { background: #f4f5f7; padding: 16px; border-radius: 4px; overflow-x: auto; margin: 16px 0; }
+    pre code { background: none; padding: 0; }
+    blockquote { border-left: 4px solid #dfe1e6; margin: 0; padding-left: 16px; color: #6b778c; }
+    .clf { text-align: right; font-style: italic; color: #6b778c; font-size: 0.9em; margin-bottom: 24px; }
+    .page-title { font-size: 2em; font-weight: 700; border-bottom: 2px solid #0052cc;
+                  padding-bottom: 10px; margin-bottom: 24px; color: #0052cc; }
+    .preview-badge { background: #ff8b00; color: white; font-size: 0.75em; font-weight: 600;
+                     padding: 2px 8px; border-radius: 12px; vertical-align: middle; margin-left: 8px; }
+    """
+
+    def esc(s):
+        return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    def render_marks(text, marks):
+        for mark in marks:
+            t = mark.get('type')
+            if t == 'strong':     text = f'<strong>{text}</strong>'
+            elif t == 'em':       text = f'<em>{text}</em>'
+            elif t == 'code':     text = f'<code>{text}</code>'
+            elif t == 'underline': text = f'<u>{text}</u>'
+            elif t == 'strike':   text = f'<s>{text}</s>'
+            elif t == 'link':
+                href = esc(mark.get('attrs', {}).get('href', '#'))
+                text = f'<a href="{href}">{text}</a>'
+        return text
+
+    def render_inline(nodes):
+        parts = []
+        for n in nodes:
+            t = n.get('type')
+            if t == 'text':
+                txt = esc(n.get('text', '')).replace('\n', '<br>')
+                parts.append(render_marks(txt, n.get('marks', [])))
+            elif t == 'hardBreak':
+                parts.append('<br>')
+            elif t == 'mention':
+                parts.append(f"@{esc(n.get('attrs', {}).get('text', 'user'))}")
+            elif t == 'emoji':
+                parts.append(esc(n.get('attrs', {}).get('text', '')))
+        return ''.join(parts)
+
+    def render_list_item(node):
+        parts = []
+        for child in node.get('content', []):
+            if child.get('type') == 'paragraph':
+                parts.append(render_inline(child.get('content', [])))
+            else:
+                parts.append(render_node(child))
+        return ''.join(parts)
+
+    def render_node(node):
+        t    = node.get('type')
+        kids = node.get('content', [])
+        attr = node.get('attrs', {})
+
+        if t == 'heading':
+            lv = attr.get('level', 2)
+            return f'<h{lv}>{render_inline(kids)}</h{lv}>\n'
+
+        if t == 'paragraph':
+            inner = render_inline(kids)
+            if not inner.strip():
+                return '<p>&nbsp;</p>\n'
+            align = attr.get('textAlign', '')
+            if align == 'right':
+                return f'<p class="clf">{inner}</p>\n'
+            style = f' style="text-align:{align}"' if align and align != 'left' else ''
+            return f'<p{style}>{inner}</p>\n'
+
+        if t == 'bulletList':
+            items = ''.join(f'<li>{render_list_item(i)}</li>' for i in kids)
+            return f'<ul>{items}</ul>\n'
+
+        if t == 'orderedList':
+            start = attr.get('order', 1)
+            items = ''.join(f'<li>{render_list_item(i)}</li>' for i in kids)
+            return f'<ol start="{start}">{items}</ol>\n'
+
+        if t == 'table':
+            rows = ''.join(render_node(r) for r in kids)
+            return f'<table>{rows}</table>\n'
+
+        if t == 'tableRow':
+            return f'<tr>{"".join(render_node(c) for c in kids)}</tr>\n'
+
+        if t == 'tableHeader':
+            inner = ''.join(render_node(c) for c in kids)
+            return f'<th>{inner}</th>'
+
+        if t == 'tableCell':
+            inner = ''.join(render_node(c) for c in kids)
+            return f'<td>{inner}</td>'
+
+        if t == 'panel':
+            ptype      = attr.get('panelType', 'info')
+            title_node = next((n for n in kids if n.get('type') == 'panelTitle'), None)
+            body_nodes  = [n for n in kids if n.get('type') != 'panelTitle']
+            title_html = (f'<div class="panel-title">'
+                          f'{render_inline(title_node.get("content", []))}</div>'
+                          if title_node else '')
+            body_html = ''.join(render_node(n) for n in body_nodes)
+            return f'<div class="panel panel-{esc(ptype)}">{title_html}{body_html}</div>\n'
+
+        if t == 'rule':
+            return '<hr>\n'
+
+        if t == 'codeBlock':
+            lang = esc(attr.get('language', ''))
+            code_text = esc(''.join(n.get('text', '') for n in kids if n.get('type') == 'text'))
+            return f'<pre><code class="language-{lang}">{code_text}</code></pre>\n'
+
+        if t == 'blockquote':
+            return f'<blockquote>{"".join(render_node(n) for n in kids)}</blockquote>\n'
+
+        # fallback: recurse into children
+        return ''.join(render_node(n) for n in kids)
+
+    body_html    = ''.join(render_node(n) for n in adf.get('content', []))
+    title_esc    = esc(title)
+    title_block  = (f'<div class="page-title">{title_esc}'
+                    f'<span class="preview-badge">PREVIEW</span></div>\n'
+                    if title else '')
+
+    return (
+        f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
+        f'<meta charset="UTF-8">\n'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        f'<title>{title_esc} (Preview)</title>\n'
+        f'<style>{CSS}</style>\n'
+        f'</head>\n<body>\n'
+        f'{title_block}'
+        f'{body_html}'
+        f'</body>\n</html>\n'
+    )
 
 
 def detect_template_from_text(text: str) -> str:
@@ -2111,6 +2311,8 @@ def main():
     parser.add_argument("--labels", help="Comma-separated labels")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview upload plan without publishing")
+    parser.add_argument("--preview", action="store_true",
+                        help="Render the built ADF as a local HTML page and open in browser before publishing")
     parser.add_argument("--test-auth", action="store_true",
                         help="Test credentials and list spaces, then exit")
     parser.add_argument("--analyze", help="Analyze a file's structure without publishing")
@@ -2356,6 +2558,22 @@ def main():
 
         labels = [l.strip() for l in args.labels.split(",")] if args.labels else []
 
+        # Local HTML preview — open in browser before proceeding
+        if args.preview:
+            import tempfile, webbrowser
+            html = adf_to_html(adf, title)
+            tmp = tempfile.NamedTemporaryFile(
+                mode='w', suffix='.html', delete=False, encoding='utf-8'
+            )
+            tmp.write(html)
+            tmp.close()
+            webbrowser.open(f'file://{tmp.name}')
+            print(f"\n[Preview] Opened in browser: {tmp.name}")
+            go = input("Continue to publish? [y/N] ").strip().lower()
+            if go != 'y':
+                print(f"Aborted. Preview saved at: {tmp.name}")
+                return
+
         print(f"\nUpload plan:")
         print(f"  Title:    {title}")
         print(f"  Space:    {args.space}")
@@ -2377,11 +2595,15 @@ def main():
         existing = find_existing_page(space_id, title)
 
         if existing:
-            print(f"\nCOLLISION: '{title}' already exists.")
-            choice = input("  1=Overwrite  2=Skip  [1/2]: ").strip()
-            if choice == "2":
-                print("Skipped.")
+            # Diff-aware update — skip the API call if nothing actually changed
+            live_adf, _ = fetch_page_adf(existing["id"])
+            changed, diff_summary = diff_adf(live_adf, adf)
+            if not changed:
+                print(f"\nNo changes detected — '{title}' is already up to date. Skipped.")
                 return
+            print(f"\nUpdating '{title}':")
+            for line in diff_summary:
+                print(line)
             page = update_page(existing["id"], title, adf)
         else:
             page = create_page(space_id, title, adf, parent_id, labels)
@@ -2486,6 +2708,16 @@ def main():
                         results.append({"file": source, "title": title, "status": "SKIP", "url": ""})
                         continue
                     else:
+                        # Diff-aware update — skip if content is unchanged
+                        live_adf, _ = fetch_page_adf(existing["id"])
+                        changed, diff_summary = diff_adf(live_adf, adf)
+                        if not changed:
+                            results.append({"file": source, "title": title,
+                                            "status": "UNCHANGED", "url": page_url(existing)})
+                            print(f"  Unchanged — skipped.")
+                            continue
+                        for line in diff_summary:
+                            print(f" {line}")
                         page = update_page(existing["id"], title, adf)
                 else:
                     page = create_page(space_id, title, adf, parent_id, labels)
@@ -2499,12 +2731,13 @@ def main():
                 print(f"  FAILED: {e}")
 
         # Summary
-        ok    = sum(1 for r in results if r["status"] == "OK")
-        skip  = sum(1 for r in results if r["status"] == "SKIP")
-        fail  = sum(1 for r in results if r["status"] == "FAIL")
+        ok        = sum(1 for r in results if r["status"] == "OK")
+        skip      = sum(1 for r in results if r["status"] == "SKIP")
+        unchanged = sum(1 for r in results if r["status"] == "UNCHANGED")
+        fail      = sum(1 for r in results if r["status"] == "FAIL")
 
         print(f"\n{'='*60}")
-        print(f"Results: {ok} published, {skip} skipped, {fail} failed")
+        print(f"Results: {ok} published, {unchanged} unchanged, {skip} skipped, {fail} failed")
         print(f"{'FILE':<40} {'STATUS':<8} {'URL'}")
         print("-" * 100)
         for r in results:
