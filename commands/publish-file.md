@@ -19,9 +19,9 @@ Convert and publish a single document to Confluence. Follow the confluence-publi
    - Step 1: Validate credentials
    - Step 2: Discover spaces + build SESSION_TREE (skip if already done this session)
    - Step 3: Ask which space and parent page/folder to publish under
-   - Step 4: Show upload plan — wait for confirmation unless `--go` is set
+   - Step 4: Show upload plan with compliance warnings — wait for confirmation unless `--go` is set
    - Step 5: Collision detection
-   - Step 6: Convert via doc-converter skill, then publish
+   - Step 6: Convert via doc-converter skill (including compliance checks), then publish
    - Step 7: Report result with URL
 
 4. Run the publish script:

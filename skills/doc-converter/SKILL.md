@@ -98,7 +98,7 @@ Export as HTML (not plain text) to preserve heading levels and inline formatting
 ```
 https://docs.google.com/feeds/download/documents/export/Export?id={DOC_ID}&exportFormat=html
 ```
-Parse the HTML to extract heading levels (`h1`–`h6`), paragraphs, lists (`ul`/`ol`), and tables. See `references/style-mapping.md` for the HTML → ADF mapping.
+Parse the HTML to extract heading levels (`h1`–`h6`), paragraphs, lists (`ul`/`ol`), and tables. Inline marks (bold, italic, underline, strikethrough, color spans) are also preserved. See `references/style-mapping.md` for the HTML → ADF mapping.
 
 ---
 
@@ -143,6 +143,7 @@ Scan the document content for keywords to determine the Confluence template. App
 |---|---|
 | Policy | "purpose", "scope", "policy statement", "compliance", "shall" |
 | Procedure | "steps", "procedure", "prerequisites", "how to", numbered step list |
+| Workflow | "trigger", "flow steps", "decision points", "outcomes", "approval" |
 | Form | Checkbox characters (☐ ✓), fill-in blanks (`___`), "signature", "date:" |
 | Checklist | Majority of content is checkbox items (☐), short lines |
 | Meeting Minutes | "attendees", "agenda", "action items", "decisions", date in title |
@@ -170,6 +171,8 @@ Apply all cleanup rules before building the output. Full rules in `references/cl
 - **Single-item lists** — convert to a plain paragraph.
 - **Orphaned bold paragraphs** — if an entire paragraph is bold and follows a heading pattern, offer to promote it to a heading.
 - **Numbered heading continuity** — if headings include manual Arabic numbers (e.g. "1. Purpose"), detect any level where the sequence restarts mid-document and renumber to be continuous. Hierarchical sub-numbering that resets per parent (1.1, 1.2 → 2.1, 2.2) is correct and must not be changed.
+- **Template compliance** — after detecting the template, compare the document's headings against the required sections list. Report any missing required sections before publishing.
+- **Naming convention** — check the source filename against the expected pattern for the detected template (e.g. `ORG-POL-NNN Title` for Policy). Report if the filename doesn't match. See `references/templates.md` for all patterns.
 
 ---
 

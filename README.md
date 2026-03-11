@@ -5,11 +5,15 @@ A Claude Code plugin that converts `.docx` files and Google Docs into properly s
 ## Features
 
 - **Smart conversion** — preserves headings, tables, bullet/numbered lists, bold/italic/underline
+- **Google Docs support** — exports as HTML (not plain text), preserving heading levels, lists, tables, and inline formatting
 - **Formatting cleanup** — fixes consecutive headings, style misuse, Roman numeral lists, multiline heading paragraphs
-- **Template auto-detection** — identifies Policy, Procedure, Form, Checklist, ISO 27001, and more
+- **Template auto-detection** — identifies Policy, Procedure, Workflow, Form, Checklist, Meeting Minutes, ISO 27001, and more
+- **Template compliance checking** — validates required sections are present for the detected template before publishing
+- **Naming convention validation** — flags filenames that don't match the template naming pattern (e.g. `ACME-POL-001 Title`)
 - **Full Confluence tree scan** — finds pages and folders at any nesting depth (including Confluence folder types)
 - **Bulk publishing** — publish an entire folder or zip archive in one command
-- **Upload plan** — always shows what will be published before touching Confluence
+- **Upload plan** — always shows what will be published, with compliance warnings, before touching Confluence
+- **doc-lint integration** — if the [doc-lint](https://github.com/dboneku/doc-lint) plugin is installed, uses its full rule set for richer analysis and pre-publish cleanup
 
 ## Installation
 
@@ -63,7 +67,7 @@ Analyze a document's structure and report issues without publishing anything.
 /confluence-publisher:analyze docs/MyPolicy.docx
 ```
 
-Reports: consecutive headings, style misuse, list type issues, auto-detected template.
+Reports: consecutive headings, style misuse, list type issues, auto-detected template, missing required sections, and naming convention compliance.
 
 ### `/confluence-publisher:publish-file <file> [--go]`
 Convert and publish a single `.docx` file or Google Doc URL to Confluence.
@@ -96,16 +100,18 @@ Extracts to a temp directory, publishes, then cleans up automatically.
 ## How It Works
 
 1. **Analyzes** the document structure (headings, lists, tables, font sizes, style misuse)
-2. **Detects** the best Confluence template (Policy, Procedure, Form, etc.)
-3. **Applies cleanup rules**:
-   - Consecutive same-level headings → bullet lists
+2. **Detects** the best Confluence template (Policy, Procedure, Workflow, Form, Checklist, Meeting Minutes, ISO 27001)
+3. **Checks compliance** — reports missing required sections and naming convention issues before publishing
+4. **Applies cleanup rules**:
+   - Consecutive same-level headings (≥ 3) → bullet lists
    - Heading-styled body text → reclassified as paragraphs
    - Multiline heading paragraphs → split into heading + body
    - Roman numeral / alphabetic lists → Arabic numbered lists
    - Single-item lists → plain paragraphs
-4. **Scans** the Confluence space tree (including folders — which the v2 API silently misses)
-5. **Shows** an upload plan and waits for confirmation
-6. **Publishes** using the Confluence Cloud REST API v2
+   - Numbered headings that restart mid-document → renumbered continuously
+5. **Scans** the Confluence space tree (including folders — which the v2 API silently misses)
+6. **Shows** an upload plan with compliance warnings and waits for confirmation
+7. **Publishes** using the Confluence Cloud REST API v2
 
 ## Requirements
 
@@ -116,8 +122,11 @@ Extracts to a temp directory, publishes, then cleans up automatically.
 
 ## Skills Included
 
+### `confluence-publisher`
+Handles credential validation, space discovery, page tree scanning, upload planning, collision detection, and publishing via the Confluence Cloud REST API.
+
 ### `doc-converter`
-Handles document ingestion, structural analysis, and ADF conversion. Can be used independently of Confluence publishing.
+Handles document ingestion, structural analysis, formatting cleanup, template detection, compliance checking, and ADF conversion. Can be used independently of Confluence publishing.
 
 ### `confluence-publisher`
 Handles the full Confluence workflow: credential validation, space/tree discovery, upload planning, collision detection, and publishing.

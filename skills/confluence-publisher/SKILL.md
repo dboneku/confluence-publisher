@@ -105,10 +105,13 @@ Upload plan:
 │ 1090-OHH-POL-Applicant Screening Policy.docx│ 1090-OHH-POL-... │ OHH   │ Hiring       │ Policy   │
 └─────────────────────────────────────────────┴──────────────────┴───────┴──────────────┴──────────┘
 
+Compliance warnings:
+  ⚠ 1090-OHH-POL-Applicant Screening Policy.docx: missing required sections — Compliance, Revision History
+
 Collision handling: [ ] Overwrite  [ ] Skip  [ ] Ask per file
 ```
 
-Wait for explicit confirmation ("yes", "go", "confirm") or `--go` flag before proceeding.
+Wait for explicit confirmation ("yes", "go", "confirm") or `--go` flag before proceeding. Compliance warnings are informational — they do not block publishing, but should be reviewed.
 
 ---
 

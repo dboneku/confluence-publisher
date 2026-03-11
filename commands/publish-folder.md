@@ -25,6 +25,7 @@ Convert and publish all .docx files in a folder to Confluence. Follow the conflu
    - Proposed title (normalized from filename)
    - Auto-detected template
    - Issues count
+   - Compliance warnings (missing sections, naming convention)
 
 6. Show the full upload plan as a table (all files):
    ```
@@ -36,6 +37,10 @@ Convert and publish all .docx files in a folder to Confluence. Follow the conflu
    │ 1036-OHH-FRM-Applicant Consent.docx │ Form         │  3⚠  │ 1036-OHH-.. │
    └──────────────────────────────────────┴──────────────┴───────┴─────────────┘
    Space: OHH | Parent: Hiring
+
+   Compliance warnings:
+     1090-OHH-POL-Screening Policy.docx: missing sections — Compliance, Revision History
+     1036-OHH-FRM-Applicant Consent.docx: naming convention OK
    ```
    Wait for confirmation unless `--go` is set.
 

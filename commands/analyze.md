@@ -24,10 +24,12 @@ Run structural analysis on the specified document and report findings to the ter
    Template (auto-detected): Policy
    Structure: 38 headings, 14 paragraphs, 0 lists, 0 tables
 
-   Issues (3):
+   Issues (5):
      ⚠  Consecutive headings: "Contractors" is heading #3 in a row (lines 7–9)
      ⚠  Style misuse: 14 "Heading 1" paragraphs at ≤12pt — will reclassify as body text
      ℹ  No lists detected — possible Roman numeral or alpha lists embedded in paragraphs
+     ⚠  Template compliance (Policy): missing required sections — Compliance, Revision History
+     ⚠  Naming convention: "MyPolicy.docx" does not match Policy pattern (e.g. ACME-POL-001 My Policy)
 
    Cleanup actions that would be applied on publish:
      ✓  14 misused headings → reclassified as paragraphs
