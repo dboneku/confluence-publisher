@@ -1,12 +1,75 @@
 ---
 name: doc-converter
-description: This skill should be used when the user asks to "convert a document", "upload a document", "publish a document to Confluence", "convert a Word doc", "convert a Google Doc", "process a .docx file", or mentions converting documents to ADF, markdown, or HTML. Handles structural analysis, formatting cleanup, template detection, and conversion of .docx and Google Docs to structured output formats.
-version: 0.1.0
+description: This skill should be used when the user asks to "convert a document", "upload a document", "publish a document to Confluence", "convert a Word doc", "convert a Google Doc", "process a .docx file", "upload a spreadsheet", "upload an Excel file", "upload a Google Sheet", "upload a PDF", or mentions converting documents to ADF, markdown, or HTML. Handles structural analysis, formatting cleanup, template detection, and conversion of .docx, Google Docs, Excel, Google Sheets, and PDFs to Confluence pages.
+version: 0.2.0
 ---
 
 # Document Converter Skill
 
-Convert `.docx` files and Google Docs into structured output (Confluence ADF, Markdown, or HTML) with a consistent analysis-first workflow, formatting cleanup, and template auto-detection.
+Convert `.docx` files, Google Docs, Excel/Google Sheets, and PDFs into Confluence pages with a consistent analysis-first workflow, formatting cleanup, and template auto-detection.
+
+---
+
+## Step 0 — Detect File Type and Route
+
+Before anything else, check the file type and branch:
+
+| File type | Route |
+|---|---|
+| `.docx` | Continue to Step 1 |
+| Google Doc URL | Continue to Step 1 |
+| `.xlsx` / `.xls` / Google Sheets URL | Go to **Spreadsheet Path** below |
+| `.pdf` | Go to **PDF Path** below |
+| `.md` / `.txt` / `.wiki` | Continue to Step 1 (read directly) |
+
+---
+
+### Spreadsheet Path — Excel / Google Sheets
+
+Ask the user:
+```
+Spreadsheet handling options:
+1. Attach + embed viewer  — uploads the file as an attachment and embeds it inline on a
+                            Confluence page using the view-file macro. Preserves all tabs,
+                            formulas, and formatting. (recommended)
+2. Convert to ADF table   — extracts data to a plain Confluence table. Loses formulas,
+                            charts, and multi-tab structure.
+```
+
+**Option 1 — Attach + embed viewer (preferred):**
+1. Create the Confluence page using the **v1 storage format API** (not v2/ADF) with the `view-file` macro:
+   ```xml
+   <ac:structured-macro ac:name="view-file" ac:schema-version="1">
+     <ac:parameter ac:name="name"><ri:attachment ri:filename="FILENAME.xlsx" /></ac:parameter>
+   </ac:structured-macro>
+   ```
+   Use `POST /wiki/rest/api/content` with `body.storage`. The v2/ADF API rejects extension nodes.
+2. Upload the file as an attachment: `POST /wiki/rest/api/content/{pageId}/child/attachment` with header `X-Atlassian-Token: no-check`.
+3. Report the page URL. Skip Steps 1–7.
+
+**Option 2 — Convert to ADF table:**
+Use `pandas` to read the first sheet, convert rows to ADF `tableRow` nodes (first row as `tableHeader`). Continue to Step 7.
+
+**For Google Sheets:** Export as CSV for Option 2. For Option 1, ask the user to download as `.xlsx` first.
+
+---
+
+### PDF Path
+
+Ask the user:
+```
+PDF handling options:
+1. Static record  — upload the PDF as an attachment and create a Confluence page with an
+                    embedded viewer. Content is not extracted. Best for signed documents,
+                    certificates, or any PDF that must be preserved exactly as-is.
+2. Convert content — extract text and publish as a structured Confluence page (uses
+                     pdfplumber). Best for text-heavy PDFs like policies or procedures
+                     that need to be searchable and editable in Confluence.
+```
+
+**Option 1 — Static record:** Same attach + view-file macro pattern as spreadsheets. Skip Steps 1–7.
+
+**Option 2 — Convert content:** Use `pdfplumber` to extract text, then continue to Step 1.
 
 ---
 
@@ -56,6 +119,7 @@ Run analysis before converting. Report findings to the user before proceeding.
 | Non-standard font sizes | Any size outside the standardized scale (see `references/cleanup-rules.md`) |
 | Mixed fonts | More than one font family used for body text |
 | Orphaned bold/italic | Entire paragraphs in bold or italic (usually means they should be headings) |
+| Numbered heading restart | Headings with manual numbers (e.g. "1. Purpose") that reset to 1 mid-document at the same level |
 
 ### Output format
 
@@ -105,6 +169,7 @@ Apply all cleanup rules before building the output. Full rules in `references/cl
 - **List numbering** — convert Roman numerals (I/II/III) and alphabetic lists (a/b/c) to Arabic numerals (1/2/3).
 - **Single-item lists** — convert to a plain paragraph.
 - **Orphaned bold paragraphs** — if an entire paragraph is bold and follows a heading pattern, offer to promote it to a heading.
+- **Numbered heading continuity** — if headings include manual Arabic numbers (e.g. "1. Purpose"), detect any level where the sequence restarts mid-document and renumber to be continuous. Hierarchical sub-numbering that resets per parent (1.1, 1.2 → 2.1, 2.2) is correct and must not be changed.
 
 ---
 

@@ -158,6 +158,18 @@ If the user declines, retain as a styled paragraph.
 
 ---
 
+## 11. Numbered Heading Continuity
+
+**Rule:** If headings use manual numbering in their text (e.g. "1. Purpose", "2. Scope"), that numbering must be continuous throughout the document at each level. Restarting at 1 mid-document is an error.
+
+**Detection:** A document uses manual numbered headings if ≥ 2 headings at any level begin with an Arabic numeral pattern: `^\d+\.`, `^\d+\.\d+`, etc. Walk all headings at each level in document order; flag any heading where the number ≤ the previous number at the same level.
+
+**Exception:** Hierarchical sub-numbering that resets per parent (1.1, 1.2 under section 1, then 2.1, 2.2 under section 2) is correct — do NOT flag.
+
+**Action:** Replace the leading number with the correct sequential value. Preserve everything after the number. Report: "Numbered heading continuity: 2 headings renumbered at H2 (4, 5)". If the pattern is ambiguous, flag for user review rather than auto-fixing.
+
+---
+
 ## Summary Checklist
 
 Run these in order for every document:
@@ -172,3 +184,4 @@ Run these in order for every document:
 - [ ] Single-item lists — convert to paragraphs
 - [ ] Orphaned bold paragraphs — ask user about promotion
 - [ ] Checkboxes / fill-in fields — preserve verbatim
+- [ ] Numbered heading continuity — renumber headings that restart mid-document
