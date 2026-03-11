@@ -91,9 +91,10 @@ COMPLIANCE & CLEANUP
     Example: /confluence-publisher:remediate OHH --go
 
   /confluence-publisher:fixheadingnumbers [SPACE_KEY] [--folder "Name"] [--go]
-    Scan existing pages for numbered headings that restart mid-document
-    (e.g. "1. Purpose" … "2. Scope" … "1. Policy Statements") and renumber
-    them so each level is sequential within its parent heading.
+    Scan existing pages for headings with numbered prefixes (e.g. "1. Purpose",
+    "2. Scope") and strip the numbers, leaving plain heading text. All new
+    publishes strip numbered prefixes automatically; this command patches pages
+    already in Confluence.
     Shows a plan and asks for confirmation unless --go is passed.
     Example: /confluence-publisher:fixheadingnumbers
     Example: /confluence-publisher:fixheadingnumbers OHH --folder "Policies" --go

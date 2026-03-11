@@ -473,44 +473,26 @@ def strip_title_heading_from_adf(adf: dict, title: str) -> dict:
 
 
 def fix_adf_heading_numbers(adf: dict) -> tuple[dict, int]:
-    """Renumber heading nodes in ADF where numbered prefixes restart at the same level.
+    """Strip numeric prefixes (e.g. '1. ', '2. ') from all heading nodes in ADF.
 
-    Detects heading nodes whose text begins with 'N. ' and ensures numbering is
-    sequential at each heading level.  When a higher-level heading is encountered,
-    sub-level counters are reset (so H3 numbering restarts under each H2).
-
-    Returns (updated_adf, change_count).  The original dict is not mutated.
+    Returns (updated_adf, count_stripped).  The original dict is not mutated.
     """
     import copy
-    numbered_pat = re.compile(r'^(\d+)\.\s+')
-    counters: dict[int, int] = {}  # heading level -> current sequential count
+    numbered_pat = re.compile(r'^\d+\.\s+')
     changes = 0
 
     result = copy.deepcopy(adf)
     for node in result.get('content', []):
         if node.get('type') != 'heading':
             continue
-        level = node.get('attrs', {}).get('level', 1)
-        # Reset counters for all sub-levels when a higher-level heading appears
-        for k in list(counters.keys()):
-            if k > level:
-                del counters[k]
-        # Find the first text node in the heading content
         first_text = next(
             (c for c in node.get('content', []) if c.get('type') == 'text'), None
         )
         if not first_text:
             continue
         m = numbered_pat.match(first_text.get('text', ''))
-        if not m:
-            continue
-        original_num = int(m.group(1))
-        counters[level] = counters.get(level, 0) + 1
-        expected_num = counters[level]
-        if original_num != expected_num:
-            old_prefix = m.group(0)          # full matched prefix, e.g. '1. '
-            new_prefix = f'{expected_num}. '
-            first_text['text'] = new_prefix + first_text['text'][len(old_prefix):]
+        if m:
+            first_text['text'] = first_text['text'][len(m.group(0)):]
             changes += 1
     return result, changes
 
@@ -538,62 +520,83 @@ def extract_doc_id_from_title(title: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def build_doc_control_header(
-    title: str,
-    doc_id: str = None,
-    version: str = '1.0',
-    approved_date: str = None,
-    classification: str = 'Internal',
-) -> list[dict]:
-    """Return ADF nodes for the document control header table."""
-    from datetime import date as _date
-    approved = approved_date or _date.today().isoformat()
-    return [
-        metadata_table([
-            ('Document Title',  title),
-            ('Document ID',     doc_id or '\u2014'),
-            ('Version',         version),
-            ('Status',          'Current'),
-            ('Classification',  classification),
-            ('Approved Date',   approved),
-        ])
-    ]
+def _extract_classification_from_adf(adf: dict) -> str:
+    """Scan ADF content for 'Document classification: X' and return the value."""
+    clf_re = re.compile(r'document\s+classification[:\-]\s*(.+)', re.IGNORECASE)
+    for node in adf.get('content', [])[:10]:
+        m = clf_re.search(_node_text(node).strip())
+        if m:
+            return m.group(1).strip()
+    return 'Internal'
 
 
-def build_doc_control_footer(
-    title: str,
-    doc_id: str = None,
-    version: str = '1.0',
-) -> list[dict]:
+def build_doc_control_header(classification: str = 'Internal') -> list[dict]:
+    """Return a single right-aligned italic 'Document classification: X' paragraph."""
+    return [{
+        'type': 'paragraph',
+        'attrs': {'textAlign': 'right'},
+        'content': [{
+            'type': 'text',
+            'text': f'Document classification: {classification}',
+            'marks': [{'type': 'em'}],
+        }],
+    }]
+
+
+def build_doc_control_footer(title: str, doc_id: str = None) -> list[dict]:
     """Return ADF nodes for the UNCONTROLLED WHEN PRINTED warning footer."""
     id_str = f'{doc_id}  ' if doc_id else ''
     msg = (
-        f'\u26a0  UNCONTROLLED WHEN PRINTED  \u2014  {id_str}{title}  v{version}.  '
-        'The print date and page numbers are supplied by your browser or PDF viewer.  '
+        f'\u26a0  UNCONTROLLED WHEN PRINTED  \u2014  {id_str}{title}.  '
+        'The print date, version, and page numbers are supplied by your browser or PDF viewer.  '
         'Verify this is the current approved version before use.'
     )
     return [{'type': 'rule'}, info_panel(msg, 'warning')]
 
 
+_CLF_RE = re.compile(r'document\s+classification', re.IGNORECASE)
+
+
 def _has_doc_control_header(adf: dict) -> bool:
-    """Return True if the ADF already contains a document control header table."""
+    """Return True if the ADF already contains a document control classification line or old table."""
     for node in adf.get('content', [])[:3]:
-        if node.get('type') == 'table' and 'Document Title' in _node_text(node):
+        text = _node_text(node).strip()
+        if _CLF_RE.search(text):
+            return True
+        # Backward compat — old format was a metadata table
+        if node.get('type') == 'table' and 'Document Title' in text:
             return True
     return False
 
 
 def _strip_doc_control_blocks(adf: dict) -> dict:
-    """Remove existing doc control header (table + rule) and footer (rule + panel) if present."""
+    """Remove existing doc control header and footer before re-inserting fresh ones.
+
+    Strips:
+    - Any 'Document classification:' paragraphs in the first 6 nodes
+    - The old metadata table header format (backward compat)
+    - A trailing divider rule + 'UNCONTROLLED WHEN PRINTED' panel
+    """
     import copy
     result = copy.deepcopy(adf)
     nodes = result.get('content', [])
-    # Strip header table and its trailing divider rule
-    if nodes and nodes[0].get('type') == 'table':
-        if 'Document Title' in _node_text(nodes[0]):
-            nodes.pop(0)
-            if nodes and nodes[0].get('type') == 'rule':
-                nodes.pop(0)
+
+    # Strip classification paragraphs and old table from the top
+    top_keep = []
+    scanned = 0
+    for node in nodes:
+        t = node.get('type', '')
+        text = _node_text(node).strip()
+        is_clf_para = bool(_CLF_RE.search(text)) and t == 'paragraph'
+        is_old_table = t == 'table' and 'Document Title' in text
+        if (is_clf_para or is_old_table) and scanned < 6:
+            scanned += 1
+            continue   # drop this node
+        top_keep.append(node)
+        scanned += 1
+
+    nodes = top_keep
+
     # Strip footer panel and its leading divider rule
     if nodes and nodes[-1].get('type') == 'panel':
         if 'UNCONTROLLED WHEN PRINTED' in _node_text(nodes[-1]):
@@ -608,20 +611,20 @@ def wrap_with_print_controls(
     adf: dict,
     title: str,
     doc_id: str = None,
-    version: str = '1.0',
-    approved_date: str = None,
-    classification: str = 'Internal',
+    classification: str = None,
 ) -> dict:
-    """Inject document control header and 'Uncontrolled when printed' footer into ADF.
+    """Inject classification header and 'Uncontrolled when printed' footer into ADF.
 
-    Idempotent: strips any existing blocks before re-inserting, so overwrite
-    publishes never stack duplicate headers/footers.
+    The header is a single right-aligned italic 'Document classification: X' line.
+    Idempotent — strips any existing blocks before re-inserting.
+    If classification is None, auto-detects it from an existing paragraph in the doc.
     """
+    clf = classification or _extract_classification_from_adf(adf)
     clean = _strip_doc_control_blocks(adf)
-    header = build_doc_control_header(title, doc_id, version, approved_date, classification)
-    footer = build_doc_control_footer(title, doc_id, version)
+    header = build_doc_control_header(clf)
+    footer = build_doc_control_footer(title, doc_id)
     result = dict(clean)
-    result['content'] = header + [{'type': 'rule'}] + clean.get('content', []) + footer
+    result['content'] = header + clean.get('content', []) + footer
     return result
 
 
@@ -1398,20 +1401,11 @@ def to_adf(content: str, template: str = "general") -> dict:
     # Template metadata headers
     if template == "iso27001":
         nodes.append(info_panel(
-            "ISO 27001 Compliance Document — review Annex A control mapping before approving.",
+            "ISO 27001 Compliance Document \u2014 review Annex A control mapping before approving.",
             "warning"
         ))
-        nodes.append(metadata_table([
-            ("Document ID", "[TO BE COMPLETED]"),
-            ("Version", "1.0"),
-            ("Status", "Draft"),
-            ("Owner", "[TO BE COMPLETED]"),
-            ("Classification", "Internal"),
-            ("ISO 27001 Clause", "[TO BE COMPLETED]"),
-            ("Annex A Controls", "[TO BE COMPLETED]"),
-            ("Date Created", "[TO BE COMPLETED]"),
-            ("Next Review Date", "[TO BE COMPLETED]"),
-        ]))
+        # Note: document title, version, and approval metadata are managed
+        # by the eSign Document plugin. Only classification is added inline.
 
     # Convert source lines to ADF nodes
     for line in lines:
@@ -1902,8 +1896,8 @@ def run_remediate(space_key: str, folder: str = None, go: bool = False):
 
 
 def run_fix_heading_numbers(space_key: str, folder: str = None, go: bool = False):
-    """Scan all pages in a space (or folder) for restarting numbered headings and fix them."""
-    print(f"\nScanning for numbered heading restarts in {space_key}" +
+    """Scan all pages in a space (or folder) for numbered heading prefixes and strip them."""
+    print(f"\nScanning for numbered heading prefixes in {space_key}" +
           (f" / '{folder}'" if folder else "") + " ...")
 
     if folder:
@@ -1921,14 +1915,14 @@ def run_fix_heading_numbers(space_key: str, folder: str = None, go: bool = False
                          'count': count, 'new_adf': fixed_adf})
 
     if not plan:
-        print("\n\u2713 No numbered heading restarts found.")
+        print("\n\u2713 No numbered heading prefixes found.")
         return
 
-    print(f"\nFix plan \u2014 {len(plan)} page(s) with restarting numbered headings:\n")
+    print(f"\nFix plan \u2014 {len(plan)} page(s) with numbered heading prefixes:\n")
     print("\u2500" * 60)
     for p in plan:
         print(f"  {p['title']}")
-        print(f"    {p['count']} heading(s) renumbered")
+        print(f"    {p['count']} heading(s) will have number prefix stripped")
     print()
 
     if not go:
@@ -2345,10 +2339,10 @@ def main():
         # Strip leading title heading from ADF body (title lives in the Confluence title field)
         adf = strip_title_heading_from_adf(adf, title)
 
-        # Fix any restarting numbered headings (e.g. '1. Purpose' … '1. Policy Statements')
+        # Strip any numbered heading prefixes (e.g. '1. Purpose' → 'Purpose')
         adf, heading_fixes = fix_adf_heading_numbers(adf)
         if heading_fixes:
-            print(f"  Renumbered {heading_fixes} heading(s) for sequential continuity")
+            print(f"  Stripped number prefix from {heading_fixes} heading(s)")
 
         # Wrap with document control header and 'Uncontrolled when printed' footer
         doc_id = extract_doc_id_from_title(title)
@@ -2458,7 +2452,7 @@ def main():
                 adf = strip_title_heading_from_adf(adf, title)
                 adf, heading_fixes = fix_adf_heading_numbers(adf)
                 if heading_fixes:
-                    print(f"  Renumbered {heading_fixes} heading(s) for sequential continuity")
+                    print(f"  Stripped number prefix from {heading_fixes} heading(s)")
                 # Document control header and print footer
                 doc_id = extract_doc_id_from_title(title)
                 adf = wrap_with_print_controls(adf, title, doc_id=doc_id)
