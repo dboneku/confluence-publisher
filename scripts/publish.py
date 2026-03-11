@@ -934,6 +934,85 @@ def load_mapping(path: str) -> list[dict]:
 # Confluence audit and remediation
 # ---------------------------------------------------------------------------
 
+def build_space_tree(space_key: str) -> list:
+    """Build a full hierarchical tree of pages and folders in a space.
+
+    Uses CQL with expand=ancestors so every item knows its direct parent.
+    Returns a list of root-level node dicts; each node has:
+      {id, title, type, children: [...]}
+    """
+    results = []
+    start = 0
+    while True:
+        r = requests.get(
+            f"{ATLASSIAN_URL}/wiki/rest/api/content/search",
+            params={
+                "cql":    f'space="{space_key}" ORDER BY title',
+                "limit":  200,
+                "start":  start,
+                "expand": "ancestors",
+            },
+            headers=get_headers(),
+        )
+        r.raise_for_status()
+        data  = r.json()
+        batch = data.get("results", [])
+        results.extend(batch)
+        if not batch or len(results) >= data.get("totalSize", 0):
+            break
+        start += len(batch)
+
+    # Index nodes; direct parent = last element of ancestors array
+    nodes = {}
+    for item in results:
+        nodes[item["id"]] = {
+            "id":        item["id"],
+            "title":     item["title"],
+            "type":      item["type"],
+            "children":  [],
+            "parent_id": (item.get("ancestors") or [None])[-1],
+        }
+        # ancestors entries are dicts with "id"; last entry is direct parent
+        if nodes[item["id"]]["parent_id"] and isinstance(nodes[item["id"]]["parent_id"], dict):
+            nodes[item["id"]]["parent_id"] = nodes[item["id"]]["parent_id"]["id"]
+
+    # Wire up parent → children relationships
+    root_nodes = []
+    for node in nodes.values():
+        pid = node["parent_id"]
+        if pid and pid in nodes:
+            nodes[pid]["children"].append(node)
+        else:
+            root_nodes.append(node)
+
+    root_nodes.sort(key=lambda n: n["title"])
+    return root_nodes
+
+
+def _print_tree_nodes(nodes: list, indent: int = 0):
+    """Recursively print a tree produced by build_space_tree()."""
+    for node in sorted(nodes, key=lambda n: n["title"]):
+        icon   = "📁" if node["type"] == "folder" else "📄"
+        prefix = "  " * indent
+        print(f"{prefix}{icon} {node['title']}")
+        if node["children"]:
+            _print_tree_nodes(node["children"], indent + 1)
+
+
+def _count_tree(nodes: list) -> tuple[int, int]:
+    """Return (page_count, folder_count) for a tree."""
+    pages, folders = 0, 0
+    for n in nodes:
+        if n["type"] == "folder":
+            folders += 1
+        else:
+            pages += 1
+        cp, cf = _count_tree(n["children"])
+        pages += cp
+        folders += cf
+    return pages, folders
+
+
 def fetch_page_adf(page_id: str) -> tuple:
     """Fetch a Confluence page and return (adf_body, title)."""
     r = requests.get(
@@ -1318,19 +1397,82 @@ def main():
     parser.add_argument("--test-auth", action="store_true",
                         help="Test credentials and list spaces, then exit")
     parser.add_argument("--analyze", help="Analyze a file's structure without publishing")
-    parser.add_argument("--audit",     metavar="SPACE_KEY",
+    parser.add_argument("--audit",       metavar="SPACE_KEY",
                         help="Audit all pages in a space for template compliance")
-    parser.add_argument("--remediate", metavar="SPACE_KEY",
+    parser.add_argument("--remediate",   metavar="SPACE_KEY",
                         help="Audit then patch non-compliant pages with placeholder sections")
-    parser.add_argument("--folder",    metavar="FOLDER_NAME",
-                        help="Limit --audit or --remediate to a specific folder (page title)")
-    parser.add_argument("--go", action="store_true",
+    parser.add_argument("--folder",      metavar="FOLDER_NAME",
+                        help="Limit --audit, --remediate, or --tree to a specific folder")
+    parser.add_argument("--go",          action="store_true",
                         help="Skip confirmation prompts (for --remediate)")
+    parser.add_argument("--list-spaces", action="store_true",
+                        help="List all Confluence spaces and exit")
+    parser.add_argument("--tree",        metavar="SPACE_KEY",
+                        help="Print the full page/folder tree for a space and exit")
     args = parser.parse_args()
 
     # Analyze mode — no credentials needed
     if args.analyze:
         analyze_file(args.analyze)
+        return
+
+    # List spaces mode
+    if args.list_spaces:
+        if not ATLASSIAN_URL:
+            print("ERROR: ATLASSIAN_URL not set in .env")
+            sys.exit(1)
+        try:
+            spaces = list_spaces()
+            print(f"\nSpaces ({len(spaces)} total):\n")
+            for s in spaces:
+                print(f"  {s['key']:<12} — {s['name']:<40}  [{s.get('type','global')}]")
+            print()
+        except Exception as e:
+            print(f"Error fetching spaces: {e}")
+            sys.exit(1)
+        return
+
+    # Tree mode
+    if args.tree:
+        if not ATLASSIAN_URL:
+            print("ERROR: ATLASSIAN_URL not set in .env")
+            sys.exit(1)
+        try:
+            space_key = args.tree
+            print(f"\nBuilding tree for space: {space_key} ...\n")
+            if args.folder:
+                # Scope tree to a specific folder/page subtree
+                parent_id = resolve_parent_id(space_key, args.folder)
+                root_pages = walk_descendant_pages(parent_id)
+                # Build a minimal flat→tree for the subtree
+                nodes_by_id = {p["id"]: {"id": p["id"], "title": p["title"],
+                                          "type": p["type"], "children": [],
+                                          "parent_id": (p.get("ancestors") or [None])[-1]}
+                               for p in root_pages}
+                for n in nodes_by_id.values():
+                    if isinstance(n["parent_id"], dict):
+                        n["parent_id"] = n["parent_id"]["id"]
+                roots = []
+                for n in nodes_by_id.values():
+                    pid = n["parent_id"]
+                    if pid and pid in nodes_by_id:
+                        nodes_by_id[pid]["children"].append(n)
+                    else:
+                        roots.append(n)
+                roots.sort(key=lambda n: n["title"])
+                print(f"📁 {args.folder}")
+                _print_tree_nodes(roots, indent=1)
+                pages, folders = _count_tree(roots)
+                print(f"\n  {pages} page(s), {folders} folder(s) under '{args.folder}'\n")
+            else:
+                tree = build_space_tree(space_key)
+                pages, folders = _count_tree(tree)
+                print(f"Space {space_key}  —  {pages} page(s), {folders} folder(s)\n")
+                _print_tree_nodes(tree)
+                print()
+        except Exception as e:
+            print(f"Error building tree: {e}")
+            sys.exit(1)
         return
 
     # Audit mode

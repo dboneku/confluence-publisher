@@ -1,0 +1,91 @@
+---
+description: Show all available confluence-publisher slash commands with descriptions and usage examples.
+argument-hint: (no arguments)
+allowed-tools: (none)
+---
+
+Display the full command reference for the Confluence Publisher plugin.
+
+## Output
+
+Print the following exactly:
+
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║           Confluence Publisher — Command Reference                   ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+NAVIGATION
+──────────────────────────────────────────────────────────────────────
+  /confluence-publisher:getspaces
+    List all spaces in your Confluence instance.
+
+  /confluence-publisher:selectspace [SPACE_KEY]
+    Set the active space for this session. All commands will default
+    to this space until you change it.
+    Example: /confluence-publisher:selectspace OHH
+
+  /confluence-publisher:gettree [SPACE_KEY] [--folder "Name"]
+    Print the full page and folder tree for a space.
+    Defaults to the active space if one is selected.
+    Example: /confluence-publisher:gettree
+    Example: /confluence-publisher:gettree OHH --folder "HR Policies"
+
+  /confluence-publisher:cd "Folder Name" | .. | /
+    Navigate into a folder within the active space (like a filesystem cd).
+    Sets the active folder — subsequent commands will target it by default.
+    Example: /confluence-publisher:cd "Employee Management"
+    Example: /confluence-publisher:cd "Hiring"       (into a subfolder)
+    Example: /confluence-publisher:cd ..             (up one level)
+    Example: /confluence-publisher:cd /              (back to space root)
+
+PUBLISHING
+──────────────────────────────────────────────────────────────────────
+  /confluence-publisher:setup
+    Set up or update Confluence credentials (.env) and test the connection.
+
+  /confluence-publisher:publish-file <file-or-url>
+    Publish a single file (docx, pdf, md, txt, Google Doc URL) to Confluence.
+    Example: /confluence-publisher:publish-file report.docx
+
+  /confluence-publisher:publish-folder <folder-path>
+    Publish all documents in a local folder to Confluence.
+    Example: /confluence-publisher:publish-folder ./docs
+
+  /confluence-publisher:publish-zip <zip-path>
+    Publish all documents from a zip archive to Confluence.
+    Example: /confluence-publisher:publish-zip export.zip
+
+COMPLIANCE & CLEANUP
+──────────────────────────────────────────────────────────────────────
+  /confluence-publisher:audit [SPACE_KEY] [--folder "Name"]
+    Scan pages in a space (or folder) for template compliance.
+    Read-only — nothing is modified.
+    Example: /confluence-publisher:audit
+    Example: /confluence-publisher:audit OHH --folder "HR Policies"
+
+  /confluence-publisher:remediate [SPACE_KEY] [--folder "Name"] [--go]
+    Audit then auto-patch non-compliant pages with placeholder sections.
+    Shows a plan and asks for confirmation unless --go is passed.
+    Example: /confluence-publisher:remediate
+    Example: /confluence-publisher:remediate OHH --go
+
+  /confluence-publisher:analyze <file>
+    Analyze a local file's structure, detected template, and compliance
+    before publishing. Does not connect to Confluence.
+    Example: /confluence-publisher:analyze policy-draft.docx
+
+HELP
+──────────────────────────────────────────────────────────────────────
+  /confluence-publisher:help
+    Show this command reference.
+
+SESSION STATE
+──────────────────────────────────────────────────────────────────────
+  ACTIVE_SPACE    Set by /selectspace — used as default for all commands
+  ACTIVE_FOLDER   Set by /cd — used as default --folder for all commands
+  
+  Both reset when you start a new conversation.
+```
+
+After printing, ask: "What would you like to do?"

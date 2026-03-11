@@ -1,7 +1,7 @@
 ---
 name: confluence-publisher
-description: This skill should be used when the user asks to "publish to Confluence", "upload a document to Confluence", "publish a folder to Confluence", "set up Confluence credentials", "list Confluence spaces", "find a Confluence page", "audit Confluence pages", "check Confluence compliance", "remediate Confluence pages", "fix missing sections in Confluence", or mentions publishing, auditing, or remediating documents in a Confluence wiki. Handles credential validation, space discovery, page tree scanning, upload planning, collision detection, publishing, compliance auditing, and ADF remediation via the Confluence Cloud REST API.
-version: 0.2.0
+description: This skill should be used when the user asks to "publish to Confluence", "upload a document to Confluence", "publish a folder to Confluence", "set up Confluence credentials", "list Confluence spaces", "select a space", "show the page tree", "navigate to a folder", "find a Confluence page", "audit Confluence pages", "check Confluence compliance", "remediate Confluence pages", "fix missing sections in Confluence", or mentions publishing, auditing, remediating, or navigating documents in a Confluence wiki. Handles credential validation, space discovery, space/folder navigation (selectspace, cd), page tree visualization, upload planning, collision detection, publishing, compliance auditing, and ADF remediation via the Confluence Cloud REST API.
+version: 0.3.0
 ---
 
 # Confluence Publisher Skill
