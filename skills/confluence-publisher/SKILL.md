@@ -10,18 +10,27 @@ Publish converted documents to Confluence Cloud using the REST API. Always pairs
 
 ---
 
-## Step 0 — Check doc-converter
+## Step 0 — Check for doc-lint and doc-converter
 
-Before any publish operation, check whether the `doc-converter` skill is available in this session.
+**doc-lint (automatic):** `publish.py` automatically searches the Claude plugin cache for a `doc-lint` installation at runtime. No action needed — it will print one of:
+- `[doc-lint] Found — using enhanced cleanup rules` → doc-lint's `fix.py` runs on every `.docx` before conversion, applying its full rule set (font normalization, list normalization, style misuse, etc.)
+- `[doc-lint] Not found — using built-in cleanup rules` → the built-in cleanup logic inside `docx_to_adf()` handles conversion instead
 
-- If available: use it for all document conversion (Step 2 of every publish flow).
+To get enhanced rules, the user can install doc-lint alongside this plugin:
+```
+claude plugin install https://github.com/dboneku/doc-lint
+```
+
+**doc-converter skill (this session):** Check whether the `doc-converter` skill is available in this session.
+
+- If available: use it for structural analysis and ADF conversion guidance (Steps 2–6).
 - If not available: ask the user —
   ```
-  The doc-converter skill isn't loaded. It handles formatting cleanup and proper ADF conversion.
-  Install it? (Recommended — run: claude plugin install https://github.com/dboneku/confluence-publisher)
-  Or continue without it? (Raw text extraction only, no formatting cleanup)
+  The doc-converter skill isn't loaded. It handles formatting analysis and ADF conversion.
+  Install it? (Recommended — it's included in this plugin)
+  Or continue without it? (Built-in rules only)
   ```
-  If user declines: use plain-text extraction via `python-docx` and skip all cleanup rules.
+  If user declines: proceed with built-in rules, no analysis step.
 
 ---
 

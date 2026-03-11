@@ -29,6 +29,45 @@ def normalize_title(stem: str) -> str:
     return re.sub(r'\s*-\s*', '-', stem).strip()
 
 
+# ---------------------------------------------------------------------------
+# doc-lint integration (optional soft dependency)
+# ---------------------------------------------------------------------------
+
+_DOC_LINT_CACHE = None  # cached result of find_doc_lint()
+
+def find_doc_lint():
+    """
+    Search the Claude plugin cache for a doc-lint installation.
+    Returns (lint_py, fix_py) paths if found, or (None, None) if not installed.
+    """
+    import glob as _glob
+    patterns = [
+        str(Path.home() / ".claude" / "plugins" / "cache" / "**" / "doc-lint" / "scripts" / "fix.py"),
+        str(Path.home() / ".claude" / "plugins" / "**" / "doc-lint" / "scripts" / "fix.py"),
+    ]
+    for pattern in patterns:
+        matches = _glob.glob(pattern, recursive=True)
+        if matches:
+            fix_py  = Path(matches[0])
+            lint_py = fix_py.parent / "lint.py"
+            if lint_py.exists():
+                return lint_py, fix_py
+    return None, None
+
+
+def get_doc_lint():
+    """Return cached (lint_py, fix_py) or (None, None). Prints status on first call."""
+    global _DOC_LINT_CACHE
+    if _DOC_LINT_CACHE is None:
+        lint_py, fix_py = find_doc_lint()
+        _DOC_LINT_CACHE = (lint_py, fix_py)
+        if lint_py:
+            print(f"[doc-lint] Found — using enhanced cleanup rules from {fix_py.parent}")
+        else:
+            print("[doc-lint] Not found — using built-in cleanup rules (install doc-lint for enhanced rules)")
+    return _DOC_LINT_CACHE
+
+
 def get_headers():
     if not ATLASSIAN_EMAIL or not ATLASSIAN_TOKEN:
         print("ERROR: Missing ATLASSIAN_EMAIL or ATLASSIAN_API_TOKEN in .env")
@@ -419,7 +458,21 @@ def ingest_file(source: str):
         raise FileNotFoundError(f"File not found: {source}")
     ext = p.suffix.lower()
     if ext == ".docx":
-        return docx_to_adf(str(p))   # returns ADF dict directly
+        _, fix_py = get_doc_lint()
+        if fix_py:
+            # Run doc-lint fix.py on a temp copy, then convert the cleaned file
+            import subprocess, shutil
+            tmp = p.with_suffix("._tmp_.docx")
+            shutil.copy(str(p), str(tmp))
+            try:
+                subprocess.run(
+                    [sys.executable, str(fix_py), "--file", str(tmp), "--overwrite"],
+                    capture_output=True
+                )
+                return docx_to_adf(str(tmp))
+            finally:
+                tmp.unlink(missing_ok=True)
+        return docx_to_adf(str(p))   # built-in cleanup via docx_to_adf
     elif ext == ".pdf":
         return ingest_pdf(str(p))
     else:

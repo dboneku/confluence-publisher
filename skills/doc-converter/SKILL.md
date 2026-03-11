@@ -28,7 +28,7 @@ If the user has already stated the target (e.g. "publish to Confluence"), skip t
 ## Step 2 — Ingest the Source
 
 **For `.docx`:**
-Use `docx_to_adf()` from `publish.py` — do not use plain-text extraction. This function preserves styles, runs, lists, and tables.
+`publish.py` automatically detects whether `doc-lint` is installed. If it is, `doc-lint`'s `fix.py` runs on the file first (applying its full rule set), then `docx_to_adf()` converts the pre-cleaned file. If `doc-lint` is not installed, `docx_to_adf()` applies its built-in cleanup rules directly during conversion. Either way, no manual action needed — the best available rules are used automatically.
 
 **For Google Docs:**
 Export as HTML (not plain text) to preserve heading levels and inline formatting:
