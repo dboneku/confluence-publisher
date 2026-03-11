@@ -5,5 +5,23 @@
   "author": {
     "name": "dboneku",
     "url": "https://github.com/dboneku/confluence-publisher"
-  }
+  },
+  "license": "MIT",
+  "repository": "https://github.com/dboneku/confluence-publisher",
+  "homepage": "https://github.com/dboneku/confluence-publisher",
+  "readme": "README.md",
+  "keywords": [
+    "confluence",
+    "atlassian",
+    "docx",
+    "google-docs",
+    "publishing",
+    "documentation",
+    "markdown",
+    "adf"
+  ],
+  "categories": [
+    "productivity",
+    "documentation"
+  ]
 }
