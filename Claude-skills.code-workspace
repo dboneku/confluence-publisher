@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../doc-lint"
+		},
+		{
+			"path": "../../Downloads/OversiteConfluence"
+		}
+	],
+	"settings": {}
+}
