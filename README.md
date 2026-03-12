@@ -9,13 +9,14 @@ A Claude Code plugin that converts `.docx` files and Google Docs into properly s
 - **Formatting cleanup** — fixes consecutive headings, style misuse, Roman numeral lists, multiline heading paragraphs
 - **Template auto-detection** — identifies Policy, Procedure, Workflow, Form, Checklist, Meeting Minutes, ISO 27001, and more
 - **Template compliance checking** — validates required sections are present for the detected template before publishing
-- **Naming convention validation** — flags filenames that don't match the template naming pattern (e.g. `ACME-POL-001 Title`)
+- **Naming convention validation** — flags filenames that don't match the template naming pattern (e.g. `OHH-POL-001 Title`) — prefix-first names also enable bulk document control configuration in eSign for Confluence
 - **Full Confluence tree scan** — finds pages and folders at any nesting depth (including Confluence folder types)
 - **Bulk publishing** — publish an entire folder or zip archive in one command
 - **Upload plan** — always shows what will be published, with compliance warnings, before touching Confluence
 - **doc-lint integration** — if the [doc-lint](https://github.com/dboneku/doc-lint) plugin is installed, uses its full rule set for richer analysis and pre-publish cleanup
 - **Space audit** — scan existing Confluence pages for template compliance and naming convention violations
 - **Auto-remediation** — patch non-compliant pages by inserting missing section placeholders without removing existing content
+- **eSign-ready naming** — all naming conventions put the doc type prefix first so eSign for Confluence Space Settings can match and apply approval/review workflows per document type automatically
 
 ## Installation
 
@@ -118,6 +119,49 @@ Audit then automatically patch non-compliant pages by inserting warning-panel pl
 ```
 
 Shows a remediation plan (which pages, which sections) before making any changes. Missing sections are inserted before `Revision History` (or appended at end) as an H2 heading + yellow warning panel with `[TO BE COMPLETED — Section Name]`. Naming convention violations are reported but require manual renaming in Confluence.
+
+## Document Control with eSign for Confluence
+
+If you need formal document control — approvers, reviewers, e-signature workflows, retention policies — the [eSign for Confluence](https://marketplace.atlassian.com/apps/1217038/esign-for-confluence) app supports **bulk configuration by document ID prefix** through its Space Settings UI. No scripting required.
+
+**Plugin documentation:** [eSign for Confluence docs](https://support.esign-app.com/edoc) | [Space Settings guide](https://support.esign-app.com/edoc/guide/config/space-settings)
+
+### How it works
+
+1. confluence-publisher already enforces prefix-first naming conventions for all controlled document types:
+   ```
+   OHH-POL-001 Information Security Policy
+   OHH-PRO-002 Onboarding Procedure
+   OHH-FRM-003 Incident Report Form
+   ```
+
+2. In eSign → **Space Settings → Document Types**, create a document type for each prefix (e.g. `OHH-POL`, `OHH-PRO`, `OHH-FRM`).
+
+3. For each document type, configure:
+   - **Approvers** and approval workflow
+   - **Reviewers** and review cadence
+   - **e-Signature requirements**
+   - **Permissions** (who can view, edit, approve)
+   - **Retention and review schedule**
+
+   Any Confluence page whose title starts with that prefix automatically inherits those settings.
+
+4. Publish all your controlled documents with confluence-publisher. Because the prefix is always first in the title, every page is automatically picked up by the matching eSign document type — no per-page configuration needed.
+
+### Recommended prefix structure
+
+| Document type | Prefix | Example title |
+|---|---|---|
+| Policy | `[Org]-POL` | `OHH-POL-001 Information Security Policy` |
+| Procedure | `[Org]-PRO` | `OHH-PRO-002 Onboarding Procedure` |
+| Workflow | `[Org]-WF` | `OHH-WF-003 Incident Response Workflow` |
+| Form | `[Org]-FRM` | `OHH-FRM-004 Access Request Form` |
+| Checklist | `[Org]-CHK` | `OHH-CHK-005 New Hire Checklist` |
+| ISO 27001 | `[Org]-ISMS` | `OHH-ISMS-006 Risk Assessment Policy` |
+
+These prefixes are the same ones confluence-publisher validates and enforces through its naming convention rules — so your eSign document types and your published page titles will always stay in sync.
+
+---
 
 ## How It Works
 
