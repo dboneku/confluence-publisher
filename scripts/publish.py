@@ -14,6 +14,10 @@ from pathlib import Path
 _VENV = Path(__file__).parent.parent / ".venv"
 _SENTINEL = _VENV / ".deps-installed"
 _REQS = Path(__file__).parent / "requirements.txt"
+_SCRIPT_DIR = Path(__file__).parent
+
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 def _bootstrap():
     if not _VENV.exists():
@@ -52,6 +56,24 @@ import argparse
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
+from publisherlib.policy import (
+    check_adf_against_style_policy as _check_adf_against_style_policy,
+    extract_required_headings_from_policy as _extract_required_headings_from_policy_impl,
+    fix_adf_heading_numbers as _fix_adf_heading_numbers,
+    inject_regulation_doc_id as _inject_regulation_doc_id,
+    strip_title_heading_from_adf as _strip_title_heading_from_adf,
+)
+from publisherlib.project_config import (
+    CONFIG_SCHEMA_VERSION as PROJECT_CONFIG_SCHEMA_VERSION,
+    REGULATION_CONFIG_FILE as PROJECT_REGULATION_CONFIG_FILE,
+    STYLE_POLICY_FILE as PROJECT_STYLE_POLICY_FILE,
+    load_regulation_config as _load_regulation_config,
+    load_style_policy as _load_style_policy,
+    normalize_title as _normalize_title,
+    save_regulation_config as _save_regulation_config,
+    save_style_policy as _save_style_policy,
+    warn as _project_warn,
+)
 
 # load_dotenv() with no args calls find_dotenv(), which crashes when the script
 # is run from stdin (heredoc). Explicitly load from cwd where .env lives.
@@ -156,71 +178,39 @@ REGULATION_CONFIGS = {
     },
 }
 
-_REGULATION_CONFIG_FILE = ".confluence-config.json"
+_REGULATION_CONFIG_FILE = PROJECT_REGULATION_CONFIG_FILE
+_CONFIG_SCHEMA_VERSION = PROJECT_CONFIG_SCHEMA_VERSION
+
+
+def _warn(message: str):
+    _project_warn(message)
 
 
 def load_regulation_config() -> dict:
     """Load regulation config from .confluence-config.json in cwd."""
-    cfg_path = Path(os.getcwd()) / _REGULATION_CONFIG_FILE
-    if cfg_path.exists():
-        try:
-            return json.loads(cfg_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
+    return _load_regulation_config()
 
 
 def save_regulation_config(cfg: dict):
     """Write regulation config to .confluence-config.json in cwd."""
-    cfg_path = Path(os.getcwd()) / _REGULATION_CONFIG_FILE
-    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    _save_regulation_config(cfg)
 
 
 # ---------------------------------------------------------------------------
 # Style policy — load / save / check
 # ---------------------------------------------------------------------------
 
-_STYLE_POLICY_FILE = ".style-policy.md"
+_STYLE_POLICY_FILE = PROJECT_STYLE_POLICY_FILE
 
 
 def load_style_policy() -> tuple[str | None, dict]:
     """Return (policy_text, metadata) from .style-policy.md in cwd, or (None, {})."""
-    p = Path(os.getcwd()) / _STYLE_POLICY_FILE
-    if not p.exists():
-        return None, {}
-    raw = p.read_text(encoding='utf-8')
-    meta: dict = {}
-    body = raw
-    if raw.startswith('---'):
-        end = raw.find('\n---', 3)
-        if end != -1:
-            for line in raw[3:end].splitlines():
-                m = re.match(r'^\s*(\w+)\s*:\s*(.+)', line)
-                if m:
-                    meta[m.group(1)] = m.group(2).strip().strip('"\'')
-            body = raw[end + 4:].lstrip('\n')
-    return body, meta
+    return _load_style_policy()
 
 
 def save_style_policy(policy_text: str, source: str, section: str | None = None):
     """Write .style-policy.md with YAML frontmatter and record metadata in .confluence-config.json."""
-    from datetime import date as _date
-    fm_lines = [f'source: "{source}"', f'set_date: "{_date.today().isoformat()}"']
-    if section:
-        fm_lines.append(f'section: "{section}"')
-    content = '---\n' + '\n'.join(fm_lines) + '\n---\n\n' + policy_text
-    p = Path(os.getcwd()) / _STYLE_POLICY_FILE
-    p.write_text(content, encoding='utf-8')
-    cfg = load_regulation_config()
-    cfg['style_policy'] = {
-        'file': _STYLE_POLICY_FILE,
-        'source': source,
-        'section': section,
-        'set_date': _date.today().isoformat(),
-    }
-    save_regulation_config(cfg)
-    print(f"\nStyle policy saved to {_STYLE_POLICY_FILE}")
-    print(f"  Source:  {source}" + (f"  →  section \"{section}\"" if section else ""))
+    _save_style_policy(policy_text, source, section)
 
 
 def _page_id_from_url(url: str) -> str | None:
@@ -264,64 +254,12 @@ def _extract_section(text: str, section_heading: str) -> str:
 
 def _extract_required_headings_from_policy(policy_text: str) -> list[str]:
     """Parse a style policy text and return detected required section/heading names."""
-    required: list[str] = []
-    lines = policy_text.splitlines()
-    in_block = False
-
-    _trigger_re = re.compile(
-        r'required.{0,30}section|must include|must contain|required heading'
-        r'|all documents.{0,30}(?:must|shall).{0,30}(?:include|contain|have)',
-        re.IGNORECASE,
-    )
-    _inline_re = re.compile(
-        r'(?:required.{0,30}:|headings[:：]|sections[:：])\s*(.+)', re.IGNORECASE
-    )
-    _item_re = re.compile(r'^[\s\-\*•\d\.]+(.+)')
-
-    for line in lines:
-        s = line.strip()
-        # Inline pattern: "Required sections: Purpose, Scope, Policy Statements"
-        m = _inline_re.search(s)
-        if m:
-            for part in re.split(r'[,;/]', m.group(1)):
-                name = part.strip(' ."\'')
-                if 2 <= len(name.split()) <= 6:
-                    required.append(name)
-            in_block = False
-            continue
-        # Trigger block extraction
-        if _trigger_re.search(s):
-            in_block = True
-            continue
-        if in_block:
-            if not s:
-                continue
-            mi = _item_re.match(s)
-            if mi:
-                name = mi.group(1).strip(' ."\'')
-                if 1 <= len(name.split()) <= 7:
-                    required.append(name)
-            elif s.startswith('#') or (s and s[0] not in '-*•0123456789'):
-                in_block = False
-
-    return list(dict.fromkeys(required))   # deduplicate, preserve order
+    return _extract_required_headings_from_policy_impl(policy_text)
 
 
 def check_adf_against_style_policy(adf: dict, policy_text: str) -> list[str]:
     """Return warning strings for required headings that are absent in the ADF."""
-    required = _extract_required_headings_from_policy(policy_text)
-    if not required:
-        return []
-    heading_texts = {
-        _node_text(n).lower().strip()
-        for n in adf.get('content', [])
-        if n.get('type') == 'heading'
-    }
-    return [
-        f'Style policy: missing required section "{req}"'
-        for req in required
-        if not any(req.lower() in h or h in req.lower() for h in heading_texts)
-    ]
+    return _check_adf_against_style_policy(adf, policy_text, _node_text)
 
 
 def run_set_policy(source: str, section: str | None = None):
@@ -395,9 +333,9 @@ def run_set_policy(source: str, section: str | None = None):
 
 def _normalize_tokens(text: str) -> set:
     """Lowercase, strip punctuation, remove common stop words — return set of tokens."""
-    stop = {'the', 'of', 'and', 'a', 'an', 'in', 'for', 'to', 'with', 'on', 'at',
-            'by', 'or', 'is', 'its', 'their', 'rec', 'pol', 'pro', 'wf', 'chk'}
-    return {w for w in re.sub(r'[^\w\s]', '', text.lower()).split() if w not in stop}
+    from publisherlib.policy import normalize_tokens as _normalize_tokens_impl
+
+    return _normalize_tokens_impl(text)
 
 
 def fuzzy_doc_match(title: str, regulation: str) -> tuple[str | None, float]:
@@ -406,22 +344,9 @@ def fuzzy_doc_match(title: str, regulation: str) -> tuple[str | None, float]:
     Returns (doc_id, score) where score is Jaccard similarity in [0, 1].
     Returns (None, 0.0) if no match exceeds the threshold.
     """
-    catalog = REGULATION_CONFIGS.get(regulation, {}).get('docs', {})
-    title_tokens = _normalize_tokens(title)
-    best_id, best_score = None, 0.0
-    for doc_id, doc_name in catalog.items():
-        doc_tokens = _normalize_tokens(doc_name)
-        if not title_tokens or not doc_tokens:
-            continue
-        intersection = title_tokens & doc_tokens
-        union = title_tokens | doc_tokens
-        score = len(intersection) / len(union) if union else 0.0
-        if score > best_score:
-            best_score = score
-            best_id = doc_id
-    if best_score >= 0.35:
-        return best_id, best_score
-    return None, 0.0
+    from publisherlib.policy import fuzzy_doc_match as _fuzzy_doc_match_impl
+
+    return _fuzzy_doc_match_impl(title, regulation, REGULATION_CONFIGS)
 
 
 def inject_regulation_doc_id(title: str, regulation: str | None) -> str:
@@ -430,17 +355,7 @@ def inject_regulation_doc_id(title: str, regulation: str | None) -> str:
     e.g. 'OHH-POL-001 Information Security Policy' + iso27001 match on 02-ISMS
     →    'OHH-POL-001 02-ISMS Information Security Policy'
     """
-    if not regulation:
-        return title
-    doc_id, score = fuzzy_doc_match(title, regulation)
-    if not doc_id:
-        return title
-    # Insert doc_id between the org-number prefix and the text portion if present
-    m = re.match(r'^([A-Z0-9]+-[A-Z0-9]+-\d+)\s+(.+)$', title, re.I)
-    if m:
-        return f"{m.group(1)} {doc_id} {m.group(2)}"
-    # Fallback: prepend doc_id
-    return f"{doc_id} {title}"
+    return _inject_regulation_doc_id(title, regulation, REGULATION_CONFIGS)
 
 
 def strip_title_heading_from_adf(adf: dict, title: str) -> dict:
@@ -449,28 +364,7 @@ def strip_title_heading_from_adf(adf: dict, title: str) -> dict:
     Confluence puts the title in a discrete field; repeating it as an H1 creates
     a redundant heading at the top of the page body.
     """
-    import copy
-    nodes = adf.get('content', [])
-    if not nodes:
-        return adf
-    first = nodes[0]
-    if first.get('type') != 'heading':
-        return adf
-    heading_text = ''.join(
-        c.get('text', '') for c in first.get('content', []) if c.get('type') == 'text'
-    )
-    title_tokens   = _normalize_tokens(title)
-    heading_tokens = _normalize_tokens(heading_text)
-    if not title_tokens or not heading_tokens:
-        return adf
-    intersection = title_tokens & heading_tokens
-    union        = title_tokens | heading_tokens
-    score = len(intersection) / len(union) if union else 0.0
-    if score >= 0.5:
-        result = copy.deepcopy(adf)
-        result['content'] = result['content'][1:]
-        return result
-    return adf
+    return _strip_title_heading_from_adf(adf, title, _node_text)
 
 
 def fix_adf_heading_numbers(adf: dict) -> tuple[dict, int]:
@@ -478,23 +372,7 @@ def fix_adf_heading_numbers(adf: dict) -> tuple[dict, int]:
 
     Returns (updated_adf, count_stripped).  The original dict is not mutated.
     """
-    numbered_pat = re.compile(r'^\d+\.\s+')
-    changes = 0
-
-    result = copy.deepcopy(adf)
-    for node in result.get('content', []):
-        if node.get('type') != 'heading':
-            continue
-        first_text = next(
-            (c for c in node.get('content', []) if c.get('type') == 'text'), None
-        )
-        if not first_text:
-            continue
-        m = numbered_pat.match(first_text.get('text', ''))
-        if m:
-            first_text['text'] = first_text['text'][len(m.group(0)):]
-            changes += 1
-    return result, changes
+    return _fix_adf_heading_numbers(adf)
 
 
 # ---------------------------------------------------------------------------
@@ -1450,11 +1328,20 @@ def ingest_file(source: str):
             tmp = p.with_suffix("._tmp_.docx")
             shutil.copy(str(p), str(tmp))
             try:
-                subprocess.run(
+                result = subprocess.run(
                     [sys.executable, str(fix_py), "--file", str(tmp), "--overwrite"],
-                    capture_output=True
+                    capture_output=True,
+                    text=True,
                 )
+                if result.returncode != 0:
+                    _warn(f"doc-lint cleanup failed for {p.name}; falling back to built-in cleanup")
+                    if result.stderr:
+                        print(result.stderr.strip(), file=sys.stderr)
+                    return docx_to_adf(str(p))
                 return docx_to_adf(str(tmp))
+            except Exception as exc:
+                _warn(f"doc-lint cleanup crashed for {p.name}; falling back to built-in cleanup: {exc}")
+                return docx_to_adf(str(p))
             finally:
                 tmp.unlink(missing_ok=True)
         return docx_to_adf(str(p))   # built-in cleanup via docx_to_adf
@@ -2323,7 +2210,7 @@ def main():
     parser.add_argument("--folder",      metavar="FOLDER_NAME",
                         help="Limit --audit, --remediate, or --tree to a specific folder")
     parser.add_argument("--go",          action="store_true",
-                        help="Skip confirmation prompts (for --remediate)")
+                        help="Skip confirmation prompts and use default publish actions")
     parser.add_argument("--list-spaces",          action="store_true",
                         help="List all Confluence spaces and exit")
     parser.add_argument("--tree",                  metavar="SPACE_KEY",
@@ -2585,13 +2472,14 @@ def main():
             print("\n[DRY RUN] Would publish the above. Done.")
             return
 
-        confirm = input("\nProceed? [y/N] ").strip().lower()
-        if confirm != "y":
-            print("Aborted.")
-            return
+        if not args.go:
+            confirm = input("\nProceed? [y/N] ").strip().lower()
+            if confirm != "y":
+                print("Aborted.")
+                return
 
         space_id = resolve_space_id(args.space)
-        parent_id = resolve_parent_id(space_id, args.parent) if args.parent else None
+        parent_id = resolve_parent_id(args.space, args.parent) if args.parent else None
         existing = find_existing_page(space_id, title)
 
         if existing:
@@ -2627,13 +2515,14 @@ def main():
             print("\n[DRY RUN] Would publish the above. Done.")
             return
 
-        confirm = input(f"\nProceed with publishing {len(rows)} pages? [y/N] ").strip().lower()
-        if confirm != "y":
-            print("Aborted.")
-            return
+        if not args.go:
+            confirm = input(f"\nProceed with publishing {len(rows)} pages? [y/N] ").strip().lower()
+            if confirm != "y":
+                print("Aborted.")
+                return
 
-        collision_default = None
-        apply_to_all = False
+        collision_default = "1" if args.go else None
+        apply_to_all = args.go
         results = []
 
         for row in rows:
@@ -2686,7 +2575,7 @@ def main():
                         print(f"  \u26a0  {w}")
 
                 space_id = resolve_space_id(space_key)
-                parent_id = resolve_parent_id(space_id, parent_title) if parent_title else None
+                parent_id = resolve_parent_id(space_key, parent_title) if parent_title else None
                 existing = find_existing_page(space_id, title)
 
                 if existing:

@@ -34,19 +34,19 @@ pip install -r ~/.claude/plugins/*/confluence-publisher/scripts/requirements.txt
 
 Run the guided setup command to configure your Confluence credentials:
 
-```
+```text
 /confluence-publisher:setup
 ```
 
 This creates a `.env` file in your project directory:
 
-```
+```dotenv
 ATLASSIAN_URL=https://your-org.atlassian.net
 ATLASSIAN_EMAIL=you@example.com
 ATLASSIAN_API_TOKEN=your-token-here
 ```
 
-**Generate your API token** at: https://id.atlassian.com/manage-profile/security/api-tokens
+**Generate your API token** at: <https://id.atlassian.com/manage-profile/security/api-tokens>
 
 ### ⚠️ Keep credentials out of Git
 
@@ -61,21 +61,24 @@ Never commit your API token. If you accidentally do, revoke it immediately at th
 ## Commands
 
 ### `/confluence-publisher:setup`
+
 Guided credential configuration. Tests the connection and confirms you can reach your Confluence instance.
 
 ### `/confluence-publisher:analyze <file>`
+
 Analyze a document's structure and report issues without publishing anything.
 
-```
+```text
 /confluence-publisher:analyze docs/MyPolicy.docx
 ```
 
 Reports: consecutive headings, style misuse, list type issues, auto-detected template, missing required sections, and naming convention compliance.
 
 ### `/confluence-publisher:publish-file <file> [--go]`
+
 Convert and publish a single `.docx` file or Google Doc URL to Confluence.
 
-```
+```text
 /confluence-publisher:publish-file docs/MyPolicy.docx
 /confluence-publisher:publish-file https://docs.google.com/document/d/... --go
 ```
@@ -83,27 +86,30 @@ Convert and publish a single `.docx` file or Google Doc URL to Confluence.
 Add `--go` to skip the upload plan confirmation prompt.
 
 ### `/confluence-publisher:publish-folder <folder> [--go]`
+
 Convert and publish all `.docx` files in a folder.
 
-```
+```text
 /confluence-publisher:publish-folder ./HR-Policies --go
 ```
 
 Shows a full upload plan table for all files before publishing.
 
 ### `/confluence-publisher:publish-zip <archive.zip> [--go]`
+
 Unzip an archive and publish all `.docx` files inside it.
 
-```
+```text
 /confluence-publisher:publish-zip exports/Q1-Policies.zip
 ```
 
 Extracts to a temp directory, publishes, then cleans up automatically.
 
 ### `/confluence-publisher:audit <space-key> [--folder "Name"]`
+
 Scan existing Confluence pages for template compliance. Read-only — nothing is modified.
 
-```
+```text
 /confluence-publisher:audit OHH
 /confluence-publisher:audit OHH --folder "HR Policies"
 ```
@@ -111,9 +117,10 @@ Scan existing Confluence pages for template compliance. Read-only — nothing is
 For each page, detects the template, checks for missing required sections, and validates the naming convention. Produces a full compliance report grouped by page.
 
 ### `/confluence-publisher:remediate <space-key> [--folder "Name"] [--go]`
+
 Audit then automatically patch non-compliant pages by inserting warning-panel placeholders for every missing required section.
 
-```
+```text
 /confluence-publisher:remediate OHH
 /confluence-publisher:remediate OHH --folder "HR Policies" --go
 ```
@@ -129,7 +136,8 @@ If you need formal document control — approvers, reviewers, e-signature workfl
 ### How it works
 
 1. confluence-publisher already enforces prefix-first naming conventions for all controlled document types:
-   ```
+
+   ```text
    OHH-POL-001 Information Security Policy
    OHH-PRO-002 Onboarding Procedure
    OHH-FRM-003 Incident Report Form
@@ -151,7 +159,7 @@ If you need formal document control — approvers, reviewers, e-signature workfl
 ### Recommended prefix structure
 
 | Document type | Prefix | Example title |
-|---|---|---|
+| --- | --- | --- |
 | Policy | `[Org]-POL` | `OHH-POL-001 Information Security Policy` |
 | Procedure | `[Org]-PRO` | `OHH-PRO-002 Onboarding Procedure` |
 | Workflow | `[Org]-WF` | `OHH-WF-003 Incident Response Workflow` |
@@ -189,18 +197,17 @@ These prefixes are the same ones confluence-publisher validates and enforces thr
 ## Skills Included
 
 ### `confluence-publisher`
+
 Handles credential validation, space discovery, page tree scanning, upload planning, collision detection, and publishing via the Confluence Cloud REST API.
 
 ### `doc-converter`
-Handles document ingestion, structural analysis, formatting cleanup, template detection, compliance checking, and ADF conversion. Can be used independently of Confluence publishing.
 
-### `confluence-publisher`
-Handles the full Confluence workflow: credential validation, space/tree discovery, upload planning, collision detection, and publishing.
+Handles document ingestion, structural analysis, formatting cleanup, template detection, compliance checking, and ADF conversion. Can be used independently of Confluence publishing.
 
 ## Supported Input Formats
 
 | Format | Support |
-|---|---|
+| --- | --- |
 | `.docx` (Word) | Full formatting preservation |
 | Google Docs URL | Export via Google Docs HTML API |
 | `.pdf` | Text extraction (formatting not preserved) |
