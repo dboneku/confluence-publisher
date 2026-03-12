@@ -4,6 +4,8 @@ argument-hint: path/to/archive.zip [--go]
 allowed-tools: Read, Write, Bash, Glob
 ---
 
+# Confluence Publisher Zip Upload
+
 Unzip an archive and publish all .docx files inside it to Confluence.
 
 ## Steps
@@ -14,23 +16,46 @@ Unzip an archive and publish all .docx files inside it to Confluence.
 
 2. If no zip path provided, ask for it. Verify the file exists and ends in `.zip`.
 
-3. Extract to a temp directory:
+3. Validate the archive before extraction:
+
+   ```bash
+   MAX_MB=512
+   ZIP_BYTES=$(stat -f%z "$ZIP_PATH")
+   if [ "$ZIP_BYTES" -gt $((MAX_MB * 1024 * 1024)) ]; then
+     echo "Archive is larger than ${MAX_MB}MB; inspect it before publishing."
+     exit 1
+   fi
+   unzip -Z1 "$ZIP_PATH" | while IFS= read -r entry; do
+     case "$entry" in
+       /*|../*|*/../* )
+         echo "Unsafe archive entry: $entry"
+         exit 1
+         ;;
+     esac
+   done
+   ```
+
+4. Extract to a temp directory:
+
    ```bash
    TMPDIR=$(mktemp -d)
    unzip -q "$ZIP_PATH" -d "$TMPDIR"
    ```
 
-4. Discover all `.docx` files in the extracted directory:
+5. Discover all `.docx` files in the extracted directory:
+
    ```bash
    find "$TMPDIR" -name "*.docx" | sort
    ```
+
    Report: "Found X .docx files in archive."
 
-5. Follow the same workflow as `/confluence-publisher:publish-folder` from Step 4 onward, using the extracted temp directory as the folder path.
+6. Follow the same workflow as `/confluence-publisher:publish-folder` from Step 4 onward, using the extracted temp directory as the folder path.
 
-6. After publishing completes (success or failure), clean up the temp directory:
+7. After publishing completes (success or failure), clean up the temp directory:
+
    ```bash
    rm -rf "$TMPDIR"
    ```
 
-7. Show final results table with URLs and totals.
+8. Show final results table with URLs and totals.

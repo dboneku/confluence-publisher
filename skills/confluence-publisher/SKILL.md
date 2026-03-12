@@ -1,7 +1,6 @@
 ---
 name: confluence-publisher
 description: This skill should be used when the user asks to "publish to Confluence", "upload a document to Confluence", "publish a folder to Confluence", "set up Confluence credentials", "list Confluence spaces", "select a space", "show the page tree", "navigate to a folder", "find a Confluence page", "audit Confluence pages", "check Confluence compliance", "remediate Confluence pages", "fix missing sections in Confluence", "set a regulation", "ISO 27001", "regulatory framework", or mentions publishing, auditing, remediating, or navigating documents in a Confluence wiki. Handles credential validation, space discovery, space/folder navigation (selectspace, cd), page tree visualization, regulation context (ISO 27001 document catalog, title doc-ID injection), upload planning, collision detection, publishing, compliance auditing, and ADF remediation via the Confluence Cloud REST API.
-version: 0.4.0
 ---
 
 # Confluence Publisher Skill
@@ -17,6 +16,7 @@ Publish converted documents to Confluence Cloud using the REST API. Always pairs
 - `[doc-lint] Not found — using built-in cleanup rules` → the built-in cleanup logic inside `docx_to_adf()` handles conversion instead
 
 To get enhanced rules, the user can install doc-lint alongside this plugin:
+
 ```
 claude plugin install https://github.com/dboneku/doc-lint
 ```
@@ -25,6 +25,7 @@ claude plugin install https://github.com/dboneku/doc-lint
 
 - If available: use it for structural analysis and ADF conversion guidance (Steps 2–6).
 - If not available: ask the user —
+
   ```
   The doc-converter skill isn't loaded. It handles formatting analysis and ADF conversion.
   Install it? (Recommended — it's included in this plugin)
@@ -45,6 +46,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/publish.py" --list-regulation-docs iso270
 If a `regulation` key is present, load that regulation's document catalog into session memory as `REGULATION_DOCS`.
 
 If no regulation is set, ask the user once:
+
 ```
 Are you working under a specific regulatory framework? (e.g. ISO 27001)
   1. ISO 27001  2. None / skip
@@ -101,7 +103,7 @@ Resolve parent using `SESSION_TREE` first (no API call needed). If not found in 
 
 ---
 
-## Step 4 — Build Upload Plan
+## Step 5 — Build Upload Plan
 
 Before touching Confluence, always print the full plan:
 
@@ -119,11 +121,11 @@ Compliance warnings:
 Collision handling: [ ] Overwrite  [ ] Skip  [ ] Ask per file
 ```
 
-Wait for explicit confirmation ("yes", "go", "confirm") or `--go` flag before proceeding. Compliance warnings are informational — they do not block publishing, but should be reviewed.
+Wait for explicit confirmation ("yes", "go", "confirm") or a documented command-level `--go` shortcut before proceeding. Compliance warnings are informational — they do not block publishing, but should be reviewed.
 
 ---
 
-## Step 5 — Collision Detection
+## Step 6 — Collision Detection
 
 Before creating each page:
 ```python
@@ -139,11 +141,11 @@ COLLISION: "Title" already exists under "Parent"
 Apply to all remaining? [y/n]
 ```
 
-If `--go` flag: default to overwrite silently.
+If `--go` is supported by the calling command: default to overwrite silently.
 
 ---
 
-## Step 6 — Publish
+## Step 7 — Publish
 
 Create page:
 ```python
@@ -162,7 +164,7 @@ Always `json.dumps()` the ADF dict — the `value` field must be a JSON string.
 
 ---
 
-## Step 7 — Report Results
+## Step 8 — Report Results
 
 Single file:
 ```
