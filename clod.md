@@ -26,3 +26,6 @@
 - Surface `doc-lint` integration failures instead of quietly continuing as if enhanced cleanup succeeded.
 - Harden archive/config handling around publish workflows.
 - Continue moving pure helper logic out of `publish.py` while keeping the CLI entry point stable.
+- Keep the extracted `publisherlib` modules as the unit-test target and leave `publish.py` as orchestration glue.
+- Maintain GitHub Actions coverage for both Python regression tests and markdown contract files.
+- Keep ADF rendering and document-control helpers in `scripts/publisherlib/adf_tools.py`, and keep template/naming rules in `scripts/publisherlib/templates.py`.
