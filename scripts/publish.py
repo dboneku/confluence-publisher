@@ -50,11 +50,46 @@ except ImportError:
 import os
 import re
 import json
-import copy
 import base64
 import argparse
 import requests
-from pathlib import Path
+from publisherlib.confluence_api import (
+    build_space_tree as _build_space_tree,
+    create_page as _create_page,
+    delete_page as _delete_page,
+    fetch_page_adf as _fetch_page_adf,
+    find_existing_page as _find_existing_page,
+    get_page_version as _get_page_version,
+    list_child_pages as _list_child_pages,
+    list_spaces as _list_spaces,
+    page_url as _page_url,
+    resolve_parent_id as _resolve_parent_id,
+    resolve_space_id as _resolve_space_id,
+    update_page as _update_page,
+    walk_descendant_pages as _walk_descendant_pages,
+    walk_space_pages as _walk_space_pages,
+)
+from publisherlib.adf_tools import (
+    adf_to_html,
+    adf_to_markdown as _adf_to_markdown,
+    build_doc_control_footer,
+    build_doc_control_header,
+    bullet_list,
+    diff_adf,
+    extract_classification_from_adf as _extract_classification_from_adf,
+    extract_doc_id_from_title,
+    extract_text_from_adf as _extract_text_from_adf,
+    has_doc_control_header as _has_doc_control_header,
+    heading,
+    info_panel,
+    metadata_table,
+    node_text as _node_text,
+    paragraph,
+    strip_doc_control_blocks as _strip_doc_control_blocks,
+    text_node,
+    to_adf,
+    wrap_with_print_controls,
+)
 from dotenv import load_dotenv
 from publisherlib.policy import (
     check_adf_against_style_policy as _check_adf_against_style_policy,
@@ -67,12 +102,18 @@ from publisherlib.project_config import (
     CONFIG_SCHEMA_VERSION as PROJECT_CONFIG_SCHEMA_VERSION,
     REGULATION_CONFIG_FILE as PROJECT_REGULATION_CONFIG_FILE,
     STYLE_POLICY_FILE as PROJECT_STYLE_POLICY_FILE,
-    load_regulation_config as _load_regulation_config,
-    load_style_policy as _load_style_policy,
-    normalize_title as _normalize_title,
-    save_regulation_config as _save_regulation_config,
-    save_style_policy as _save_style_policy,
+    load_regulation_config,
+    load_style_policy,
+    normalize_title,
+    save_regulation_config,
+    save_style_policy,
     warn as _project_warn,
+)
+from publisherlib.templates import (
+    REQUIRED_SECTIONS,
+    check_template_sections,
+    detect_template_from_text,
+    validate_naming_convention,
 )
 
 # load_dotenv() with no args calls find_dotenv(), which crashes when the script
@@ -86,48 +127,6 @@ load_dotenv(Path(os.getcwd()) / '.env')
 ATLASSIAN_URL  = os.environ.get("ATLASSIAN_URL", "").rstrip("/")
 ATLASSIAN_EMAIL = os.environ.get("ATLASSIAN_EMAIL", "")
 ATLASSIAN_TOKEN = os.environ.get("ATLASSIAN_API_TOKEN", "")
-
-def normalize_title(stem: str) -> str:
-    """Collapse stray spaces around hyphens: 'OHH- POL-Foo' → 'OHH-POL-Foo'"""
-    return re.sub(r'\s*-\s*', '-', stem).strip()
-
-
-# ---------------------------------------------------------------------------
-# Template detection and compliance
-# ---------------------------------------------------------------------------
-
-REQUIRED_SECTIONS = {
-    'policy': [
-        'Purpose', 'Scope', 'Definitions', 'Roles and Responsibilities',
-        'Policy Statements', 'Compliance and Exceptions', 'Related Documents', 'Revision History',
-    ],
-    'procedure': [
-        'Purpose', 'Scope', 'Prerequisites', 'Procedure Steps',
-        'Exceptions and Escalations', 'Related Documents', 'Revision History',
-    ],
-    'workflow': [
-        'Purpose', 'Trigger', 'Roles Involved', 'Flow Steps',
-        'Decision Points', 'Outcomes', 'Related Documents',
-    ],
-    'form':          ['Instructions', 'Fields', 'Submission Guidance'],
-    'checklist':     ['Instructions', 'Checklist Items', 'Completion'],
-    'meeting_minutes': ['Attendees', 'Agenda', 'Decisions', 'Action Items'],
-    'iso27001': [
-        'Purpose', 'Scope', 'Definitions', 'Roles and Responsibilities',
-        'Policy Statements', 'Control Mapping', 'Compliance and Exceptions',
-        'Related Documents', 'Revision History',
-    ],
-}
-
-_NAMING_PATTERNS = {
-    'policy':          (re.compile(r'^[A-Z]+-POL-\d+[\s\-].+', re.I), 'ORG-POL-001 Document Title'),
-    'procedure':       (re.compile(r'^[A-Z]+-PRO-\d+[\s\-].+', re.I), 'ORG-PRO-001 Document Title'),
-    'workflow':        (re.compile(r'^[A-Z]+-WF-\d+[\s\-].+',  re.I), 'ORG-WF-001 Document Title'),
-    'form':            (re.compile(r'^[A-Z]+-FRM-\d+[\s\-].+', re.I), 'ORG-FRM-001 Document Title'),
-    'checklist':       (re.compile(r'^[A-Z]+-CHK-\d+[\s\-].+', re.I), 'ORG-CHK-001 Document Title'),
-    'meeting_minutes': (re.compile(r'^\d{4}-\d{2}-\d{2}.+',    re.I), '2026-01-01 Team Meeting Minutes'),
-    'iso27001':        (re.compile(r'^[A-Z]+-\d+[\s\-].+',     re.I), 'ORG-001-DOMAIN Document Title (Type)'),
-}
 
 # ---------------------------------------------------------------------------
 # Regulation catalog
@@ -185,32 +184,7 @@ _CONFIG_SCHEMA_VERSION = PROJECT_CONFIG_SCHEMA_VERSION
 def _warn(message: str):
     _project_warn(message)
 
-
-def load_regulation_config() -> dict:
-    """Load regulation config from .confluence-config.json in cwd."""
-    return _load_regulation_config()
-
-
-def save_regulation_config(cfg: dict):
-    """Write regulation config to .confluence-config.json in cwd."""
-    _save_regulation_config(cfg)
-
-
-# ---------------------------------------------------------------------------
-# Style policy — load / save / check
-# ---------------------------------------------------------------------------
-
 _STYLE_POLICY_FILE = PROJECT_STYLE_POLICY_FILE
-
-
-def load_style_policy() -> tuple[str | None, dict]:
-    """Return (policy_text, metadata) from .style-policy.md in cwd, or (None, {})."""
-    return _load_style_policy()
-
-
-def save_style_policy(policy_text: str, source: str, section: str | None = None):
-    """Write .style-policy.md with YAML frontmatter and record metadata in .confluence-config.json."""
-    _save_style_policy(policy_text, source, section)
 
 
 def _page_id_from_url(url: str) -> str | None:
@@ -233,20 +207,20 @@ def _extract_section(text: str, section_heading: str) -> str:
     start_level = 1
 
     for i, line in enumerate(lines):
-        m = heading_re.match(line)
-        text_part = m.group(2).strip().lower() if m else line.strip().lower()
+        match = heading_re.match(line)
+        text_part = match.group(2).strip().lower() if match else line.strip().lower()
         if target in text_part or text_part in target:
             start_idx = i
-            start_level = len(m.group(1)) if m else 1
+            start_level = len(match.group(1)) if match else 1
             break
 
     if start_idx is None:
-        return text  # section not found — return everything
+        return text
 
     result = [lines[start_idx]]
     for line in lines[start_idx + 1:]:
-        m = heading_re.match(line)
-        if m and len(m.group(1)) <= start_level:
+        match = heading_re.match(line)
+        if match and len(match.group(1)) <= start_level:
             break
         result.append(line)
     return '\n'.join(result)
@@ -287,7 +261,6 @@ def run_set_policy(source: str, section: str | None = None):
             print(f"ERROR: File not found: {source}")
             sys.exit(1)
         ingested = ingest_file(source)
-        # For ADF sources (docx, json) convert to markdown to preserve heading markers
         policy_text = _adf_to_markdown(ingested) if isinstance(ingested, dict) else ingested
         source_desc = path.name
 
@@ -298,7 +271,6 @@ def run_set_policy(source: str, section: str | None = None):
         print("ERROR: No policy content found (empty after extraction).")
         sys.exit(1)
 
-    # Preview
     preview = policy_text.strip().splitlines()
     print(f"\n── Preview ({'first 20 lines' if len(preview) > 20 else f'{len(preview)} lines'}) ──")
     for line in preview[:20]:
@@ -309,11 +281,11 @@ def run_set_policy(source: str, section: str | None = None):
     required = _extract_required_headings_from_policy(policy_text)
     if required:
         print(f"\n  Detected required sections ({len(required)}):")
-        for r in required:
-            print(f"    \u2022 {r}")
+        for section_name in required:
+            print(f"    • {section_name}")
     else:
         print(
-            "\n  \u2139  No structured required-section list detected.\n"
+            "\n  ℹ  No structured required-section list detected.\n"
             "     Policy will be stored and Claude will apply it as contextual guidance."
         )
 
@@ -325,7 +297,7 @@ def run_set_policy(source: str, section: str | None = None):
 
     save_style_policy(policy_text, source=source_desc, section=section)
     print(
-        f"\n\u2713 Policy active. Every document published or linted will be checked against it.\n"
+        f"\n✓ Policy active. Every document published or linted will be checked against it.\n"
         f"  View:  cat {_STYLE_POLICY_FILE}\n"
         f"  Clear: delete {_STYLE_POLICY_FILE}"
     )
@@ -339,443 +311,34 @@ def _normalize_tokens(text: str) -> set:
 
 
 def fuzzy_doc_match(title: str, regulation: str) -> tuple[str | None, float]:
-    """Fuzzy-match a page title against a regulation's document catalog.
-
-    Returns (doc_id, score) where score is Jaccard similarity in [0, 1].
-    Returns (None, 0.0) if no match exceeds the threshold.
-    """
+    """Fuzzy-match a page title against a regulation's document catalog."""
     from publisherlib.policy import fuzzy_doc_match as _fuzzy_doc_match_impl
 
     return _fuzzy_doc_match_impl(title, regulation, REGULATION_CONFIGS)
 
 
 def inject_regulation_doc_id(title: str, regulation: str | None) -> str:
-    """If the title closely matches a regulation document, insert its doc ID.
-
-    e.g. 'OHH-POL-001 Information Security Policy' + iso27001 match on 02-ISMS
-    →    'OHH-POL-001 02-ISMS Information Security Policy'
-    """
+    """Insert a matched regulation document ID into a title when applicable."""
     return _inject_regulation_doc_id(title, regulation, REGULATION_CONFIGS)
 
 
 def strip_title_heading_from_adf(adf: dict, title: str) -> dict:
-    """Remove the first ADF node if it is a heading that closely matches the page title.
-
-    Confluence puts the title in a discrete field; repeating it as an H1 creates
-    a redundant heading at the top of the page body.
-    """
+    """Remove the first ADF node if it is a heading that closely matches the page title."""
     return _strip_title_heading_from_adf(adf, title, _node_text)
 
 
 def fix_adf_heading_numbers(adf: dict) -> tuple[dict, int]:
-    """Strip numeric prefixes (e.g. '1. ', '2. ') from all heading nodes in ADF.
-
-    Returns (updated_adf, count_stripped).  The original dict is not mutated.
-    """
+    """Strip numeric prefixes from all heading nodes in ADF."""
     return _fix_adf_heading_numbers(adf)
 
 
-# ---------------------------------------------------------------------------
-# Document control header / print footer
-# ---------------------------------------------------------------------------
+_DOC_LINT_CACHE = None
 
-def _node_text(node: dict) -> str:
-    """Recursively collect all plain text from an ADF node."""
-    if node.get('type') == 'text':
-        return node.get('text', '')
-    return ''.join(_node_text(c) for c in node.get('content', []))
-
-
-_DOC_ID_PAT = re.compile(
-    r'^((?:[A-Z]{2,6}-[A-Z]{2,6}-\d{2,4})(?:\s+\d{2,3}-[A-Z]+)?)\s+',
-    re.IGNORECASE,
-)
-
-
-def extract_doc_id_from_title(title: str) -> str | None:
-    """Return the document ID prefix from a title like 'OHH-POL-001 02-ISMS Information Security Policy'."""
-    m = _DOC_ID_PAT.match(title)
-    return m.group(1).strip() if m else None
-
-
-def _extract_classification_from_adf(adf: dict) -> str:
-    """Scan ADF content for 'Document classification: X' and return the value."""
-    clf_re = re.compile(r'document\s+classification[:\-]\s*(.+)', re.IGNORECASE)
-    for node in adf.get('content', [])[:10]:
-        m = clf_re.search(_node_text(node).strip())
-        if m:
-            return m.group(1).strip()
-    return 'Internal'
-
-
-def build_doc_control_header(classification: str = 'Internal') -> list[dict]:
-    """Return a single right-aligned italic 'Document classification: X' paragraph."""
-    return [{
-        'type': 'paragraph',
-        'attrs': {'textAlign': 'right'},
-        'content': [{
-            'type': 'text',
-            'text': f'Document classification: {classification}',
-            'marks': [{'type': 'em'}],
-        }],
-    }]
-
-
-def build_doc_control_footer(title: str, doc_id: str = None) -> list[dict]:
-    """Return ADF nodes for the UNCONTROLLED WHEN PRINTED warning footer."""
-    id_str = f'{doc_id}  ' if doc_id else ''
-    msg = (
-        f'\u26a0  UNCONTROLLED WHEN PRINTED  \u2014  {id_str}{title}.  '
-        'The print date, version, and page numbers are supplied by your browser or PDF viewer.  '
-        'Verify this is the current approved version before use.'
-    )
-    return [{'type': 'rule'}, info_panel(msg, 'warning')]
-
-
-_CLF_RE = re.compile(r'document\s+classification', re.IGNORECASE)
-
-
-def _has_doc_control_header(adf: dict) -> bool:
-    """Return True if the ADF already contains a document control classification line or old table."""
-    for node in adf.get('content', [])[:3]:
-        text = _node_text(node).strip()
-        if _CLF_RE.search(text):
-            return True
-        # Backward compat — old format was a metadata table
-        if node.get('type') == 'table' and 'Document Title' in text:
-            return True
-    return False
-
-
-def _strip_doc_control_blocks(adf: dict) -> dict:
-    """Remove existing doc control header and footer before re-inserting fresh ones.
-
-    Strips:
-    - Any 'Document classification:' paragraphs in the first 6 nodes
-    - The old metadata table header format (backward compat)
-    - A trailing divider rule + 'UNCONTROLLED WHEN PRINTED' panel
-    """
-    import copy
-    result = copy.deepcopy(adf)
-    nodes = result.get('content', [])
-
-    # Strip classification paragraphs and old table from the top
-    top_keep = []
-    scanned = 0
-    for node in nodes:
-        t = node.get('type', '')
-        text = _node_text(node).strip()
-        is_clf_para = bool(_CLF_RE.search(text)) and t == 'paragraph'
-        is_old_table = t == 'table' and 'Document Title' in text
-        if (is_clf_para or is_old_table) and scanned < 6:
-            scanned += 1
-            continue   # drop this node
-        top_keep.append(node)
-        scanned += 1
-
-    nodes = top_keep
-
-    # Strip footer panel and its leading divider rule
-    if nodes and nodes[-1].get('type') == 'panel':
-        if 'UNCONTROLLED WHEN PRINTED' in _node_text(nodes[-1]):
-            nodes.pop()
-            if nodes and nodes[-1].get('type') == 'rule':
-                nodes.pop()
-    result['content'] = nodes
-    return result
-
-
-def wrap_with_print_controls(
-    adf: dict,
-    title: str,
-    doc_id: str = None,
-    classification: str = None,
-) -> dict:
-    """Inject classification header and 'Uncontrolled when printed' footer into ADF.
-
-    The header is a single right-aligned italic 'Document classification: X' line.
-    Idempotent — strips any existing blocks before re-inserting.
-    If classification is None, auto-detects it from an existing paragraph in the doc.
-    """
-    clf = classification or _extract_classification_from_adf(adf)
-    clean = _strip_doc_control_blocks(adf)
-    header = build_doc_control_header(clf)
-    footer = build_doc_control_footer(title, doc_id)
-    result = dict(clean)
-    result['content'] = header + clean.get('content', []) + footer
-    return result
-
-
-# ---------------------------------------------------------------------------
-# ADF diff (skip unchanged pages on update)
-# ---------------------------------------------------------------------------
-
-def diff_adf(old_adf: dict, new_adf: dict) -> tuple[bool, list[str]]:
-    """Compare two ADF dicts, ignoring doc-control wrapper blocks.
-
-    Returns (changed: bool, summary_lines: list[str]).
-    summary_lines describes what changed at the heading/section level.
-    """
-    def body_nodes(adf):
-        stripped = _strip_doc_control_blocks(copy.deepcopy(adf))
-        return stripped.get('content', [])
-
-    old_nodes = body_nodes(old_adf)
-    new_nodes = body_nodes(new_adf)
-
-    old_sigs = [json.dumps(n, sort_keys=True) for n in old_nodes]
-    new_sigs  = [json.dumps(n, sort_keys=True) for n in new_nodes]
-    if old_sigs == new_sigs:
-        return False, []
-
-    old_headings = {_node_text(n).strip() for n in old_nodes if n.get('type') == 'heading'}
-    new_headings  = {_node_text(n).strip() for n in new_nodes if n.get('type') == 'heading'}
-    added   = new_headings - old_headings
-    removed = old_headings - new_headings
-
-    summary = []
-    if added:
-        summary.append(f"  + sections added:   {', '.join(sorted(added))}")
-    if removed:
-        summary.append(f"  - sections removed: {', '.join(sorted(removed))}")
-    if not added and not removed:
-        summary.append("  ~ text content modified")
-    return True, summary
-
-
-# ---------------------------------------------------------------------------
-# ADF → HTML preview renderer
-# ---------------------------------------------------------------------------
-
-def adf_to_html(adf: dict, title: str = '') -> str:
-    """Render an ADF document to a standalone HTML string for local preview."""
-    CSS = """
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-           max-width: 960px; margin: 40px auto; padding: 0 20px; color: #172b4d; line-height: 1.6; }
-    h1 { font-size: 1.8em; border-bottom: 2px solid #dfe1e6; padding-bottom: 8px; margin-top: 32px; }
-    h2 { font-size: 1.4em; border-bottom: 1px solid #dfe1e6; padding-bottom: 4px; margin-top: 28px; }
-    h3, h4, h5, h6 { font-size: 1.1em; margin-top: 20px; }
-    p { margin: 10px 0; }
-    table { border-collapse: collapse; width: 100%; margin: 16px 0; }
-    th { background: #f4f5f7; font-weight: 600; }
-    th, td { border: 1px solid #dfe1e6; padding: 8px 12px; text-align: left; vertical-align: top; }
-    ul, ol { padding-left: 24px; margin: 8px 0; }
-    li { margin: 4px 0; }
-    .panel { border-radius: 4px; padding: 12px 16px; margin: 16px 0; border-left: 4px solid; }
-    .panel-info    { background: #e9f2ff; border-color: #0052cc; }
-    .panel-warning { background: #fffae6; border-color: #ff8b00; }
-    .panel-note    { background: #e3fcef; border-color: #00875a; }
-    .panel-error   { background: #ffebe6; border-color: #de350b; }
-    .panel-success { background: #e3fcef; border-color: #00875a; }
-    .panel-title   { font-weight: 600; margin-bottom: 6px; }
-    hr { border: none; border-top: 2px solid #dfe1e6; margin: 24px 0; }
-    code { background: #f4f5f7; padding: 2px 5px; border-radius: 3px; font-family: monospace; font-size: 0.9em; }
-    pre  { background: #f4f5f7; padding: 16px; border-radius: 4px; overflow-x: auto; margin: 16px 0; }
-    pre code { background: none; padding: 0; }
-    blockquote { border-left: 4px solid #dfe1e6; margin: 0; padding-left: 16px; color: #6b778c; }
-    .clf { text-align: right; font-style: italic; color: #6b778c; font-size: 0.9em; margin-bottom: 24px; }
-    .page-title { font-size: 2em; font-weight: 700; border-bottom: 2px solid #0052cc;
-                  padding-bottom: 10px; margin-bottom: 24px; color: #0052cc; }
-    .preview-badge { background: #ff8b00; color: white; font-size: 0.75em; font-weight: 600;
-                     padding: 2px 8px; border-radius: 12px; vertical-align: middle; margin-left: 8px; }
-    """
-
-    def esc(s):
-        return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-    def render_marks(text, marks):
-        for mark in marks:
-            t = mark.get('type')
-            if t == 'strong':     text = f'<strong>{text}</strong>'
-            elif t == 'em':       text = f'<em>{text}</em>'
-            elif t == 'code':     text = f'<code>{text}</code>'
-            elif t == 'underline': text = f'<u>{text}</u>'
-            elif t == 'strike':   text = f'<s>{text}</s>'
-            elif t == 'link':
-                href = esc(mark.get('attrs', {}).get('href', '#'))
-                text = f'<a href="{href}">{text}</a>'
-        return text
-
-    def render_inline(nodes):
-        parts = []
-        for n in nodes:
-            t = n.get('type')
-            if t == 'text':
-                txt = esc(n.get('text', '')).replace('\n', '<br>')
-                parts.append(render_marks(txt, n.get('marks', [])))
-            elif t == 'hardBreak':
-                parts.append('<br>')
-            elif t == 'mention':
-                parts.append(f"@{esc(n.get('attrs', {}).get('text', 'user'))}")
-            elif t == 'emoji':
-                parts.append(esc(n.get('attrs', {}).get('text', '')))
-        return ''.join(parts)
-
-    def render_list_item(node):
-        parts = []
-        for child in node.get('content', []):
-            if child.get('type') == 'paragraph':
-                parts.append(render_inline(child.get('content', [])))
-            else:
-                parts.append(render_node(child))
-        return ''.join(parts)
-
-    def render_node(node):
-        t    = node.get('type')
-        kids = node.get('content', [])
-        attr = node.get('attrs', {})
-
-        if t == 'heading':
-            lv = attr.get('level', 2)
-            return f'<h{lv}>{render_inline(kids)}</h{lv}>\n'
-
-        if t == 'paragraph':
-            inner = render_inline(kids)
-            if not inner.strip():
-                return '<p>&nbsp;</p>\n'
-            align = attr.get('textAlign', '')
-            if align == 'right':
-                return f'<p class="clf">{inner}</p>\n'
-            style = f' style="text-align:{align}"' if align and align != 'left' else ''
-            return f'<p{style}>{inner}</p>\n'
-
-        if t == 'bulletList':
-            items = ''.join(f'<li>{render_list_item(i)}</li>' for i in kids)
-            return f'<ul>{items}</ul>\n'
-
-        if t == 'orderedList':
-            start = attr.get('order', 1)
-            items = ''.join(f'<li>{render_list_item(i)}</li>' for i in kids)
-            return f'<ol start="{start}">{items}</ol>\n'
-
-        if t == 'table':
-            rows = ''.join(render_node(r) for r in kids)
-            return f'<table>{rows}</table>\n'
-
-        if t == 'tableRow':
-            return f'<tr>{"".join(render_node(c) for c in kids)}</tr>\n'
-
-        if t == 'tableHeader':
-            inner = ''.join(render_node(c) for c in kids)
-            return f'<th>{inner}</th>'
-
-        if t == 'tableCell':
-            inner = ''.join(render_node(c) for c in kids)
-            return f'<td>{inner}</td>'
-
-        if t == 'panel':
-            ptype      = attr.get('panelType', 'info')
-            title_node = next((n for n in kids if n.get('type') == 'panelTitle'), None)
-            body_nodes  = [n for n in kids if n.get('type') != 'panelTitle']
-            title_html = (f'<div class="panel-title">'
-                          f'{render_inline(title_node.get("content", []))}</div>'
-                          if title_node else '')
-            body_html = ''.join(render_node(n) for n in body_nodes)
-            return f'<div class="panel panel-{esc(ptype)}">{title_html}{body_html}</div>\n'
-
-        if t == 'rule':
-            return '<hr>\n'
-
-        if t == 'codeBlock':
-            lang = esc(attr.get('language', ''))
-            code_text = esc(''.join(n.get('text', '') for n in kids if n.get('type') == 'text'))
-            return f'<pre><code class="language-{lang}">{code_text}</code></pre>\n'
-
-        if t == 'blockquote':
-            return f'<blockquote>{"".join(render_node(n) for n in kids)}</blockquote>\n'
-
-        # fallback: recurse into children
-        return ''.join(render_node(n) for n in kids)
-
-    body_html    = ''.join(render_node(n) for n in adf.get('content', []))
-    title_esc    = esc(title)
-    title_block  = (f'<div class="page-title">{title_esc}'
-                    f'<span class="preview-badge">PREVIEW</span></div>\n'
-                    if title else '')
-
-    return (
-        f'<!DOCTYPE html>\n<html lang="en">\n<head>\n'
-        f'<meta charset="UTF-8">\n'
-        f'<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
-        f'<title>{title_esc} (Preview)</title>\n'
-        f'<style>{CSS}</style>\n'
-        f'</head>\n<body>\n'
-        f'{title_block}'
-        f'{body_html}'
-        f'</body>\n</html>\n'
-    )
-
-
-def detect_template_from_text(text: str) -> str:
-    """Detect document template type from plain text content."""
-    t = text.lower()
-    if any(k in t for k in ['annex a', 'iso 27001', '27001', 'isms']):
-        return 'iso27001'
-    if sum(1 for k in ['purpose', 'scope', 'policy statement', 'shall'] if k in t) >= 3:
-        return 'policy'
-    if sum(1 for k in ['steps', 'procedure', 'prerequisites'] if k in t) >= 2:
-        return 'procedure'
-    if sum(1 for k in ['attendees', 'agenda', 'action items', 'decisions'] if k in t) >= 2:
-        return 'meeting_minutes'
-    if sum(1 for k in ['trigger', 'flow steps', 'decision points'] if k in t) >= 2:
-        return 'workflow'
-    if t.count('☐') >= 5:
-        return 'checklist'
-    if t.count('☐') >= 3 or '___' in t:
-        return 'form'
-    return 'general'
-
-
-def _extract_text_from_adf(nodes: list) -> str:
-    """Recursively extract plain text from ADF node tree."""
-    parts = []
-    for node in nodes:
-        if node.get('type') == 'text':
-            parts.append(node.get('text', ''))
-        child_text = _extract_text_from_adf(node.get('content', []))
-        if child_text:
-            parts.append(child_text)
-    return ' '.join(parts)
-
-
-def check_template_sections(content_nodes: list, template: str) -> list[str]:
-    """Return list of required section names missing from the ADF content."""
-    required = REQUIRED_SECTIONS.get(template.lower(), [])
-    if not required:
-        return []
-    heading_texts = set()
-    for node in content_nodes:
-        if node.get('type') == 'heading':
-            text = ''.join(
-                c.get('text', '') for c in node.get('content', [])
-                if c.get('type') == 'text'
-            )
-            heading_texts.add(text.lower().strip())
-    return [s for s in required if s.lower() not in heading_texts]
-
-
-def validate_naming_convention(stem: str, template: str) -> tuple[bool, str]:
-    """Check filename stem against the expected naming convention for the template.
-    Returns (is_valid, example). is_valid=True also when no convention applies (general)."""
-    entry = _NAMING_PATTERNS.get(template.lower())
-    if entry is None:
-        return True, ''
-    pattern, example = entry
-    return bool(pattern.match(stem)), example
-
-
-# ---------------------------------------------------------------------------
-# doc-lint integration (optional soft dependency)
-# ---------------------------------------------------------------------------
-
-_DOC_LINT_CACHE = None  # cached result of find_doc_lint()
 
 def find_doc_lint():
-    """
-    Search the Claude plugin cache for a doc-lint installation.
-    Returns (lint_py, fix_py) paths if found, or (None, None) if not installed.
-    """
+    """Search the Claude plugin cache for a doc-lint installation."""
     import glob as _glob
+
     patterns = [
         str(Path.home() / ".claude" / "plugins" / "cache" / "**" / "doc-lint" / "scripts" / "fix.py"),
         str(Path.home() / ".claude" / "plugins" / "**" / "doc-lint" / "scripts" / "fix.py"),
@@ -783,7 +346,7 @@ def find_doc_lint():
     for pattern in patterns:
         matches = _glob.glob(pattern, recursive=True)
         if matches:
-            fix_py  = Path(matches[0])
+            fix_py = Path(matches[0])
             lint_py = fix_py.parent / "lint.py"
             if lint_py.exists():
                 return lint_py, fix_py
@@ -814,93 +377,34 @@ def get_headers():
         "Accept": "application/json",
     }
 
-# ---------------------------------------------------------------------------
-# Space helpers
-# ---------------------------------------------------------------------------
 
 def list_spaces():
-    r = requests.get(
-        f"{ATLASSIAN_URL}/wiki/api/v2/spaces",
-        params={"limit": 250},
-        headers=get_headers(),
-    )
-    r.raise_for_status()
-    return r.json().get("results", [])
+    return _list_spaces(ATLASSIAN_URL, get_headers())
 
 
 def resolve_space_id(space_key: str) -> str:
-    r = requests.get(
-        f"{ATLASSIAN_URL}/wiki/api/v2/spaces",
-        params={"keys": space_key, "limit": 1},
-        headers=get_headers(),
-    )
-    r.raise_for_status()
-    results = r.json().get("results", [])
-    if not results:
-        raise ValueError(f"Space '{space_key}' not found")
-    return results[0]["id"]
+    return _resolve_space_id(ATLASSIAN_URL, get_headers(), space_key)
 
 
 def resolve_parent_id(space_key: str, parent_title: str) -> str | None:
-    """Resolve a parent page or folder ID using CQL (v2 API silently omits folders)."""
-    if not parent_title or not parent_title.strip():
-        return None
-    r = requests.get(
-        f"{ATLASSIAN_URL}/wiki/rest/api/content/search",
-        params={"cql": f'space="{space_key}" AND title="{parent_title.strip()}"', "limit": 5},
-        headers=get_headers(),
-    )
-    r.raise_for_status()
-    results = r.json().get("results", [])
-    if not results:
-        raise ValueError(f"Parent page or folder '{parent_title}' not found in space {space_key}")
-    return results[0]["id"]
+    return _resolve_parent_id(ATLASSIAN_URL, get_headers(), space_key, parent_title)
 
 
 def find_existing_page(space_id: str, title: str) -> dict | None:
-    r = requests.get(
-        f"{ATLASSIAN_URL}/wiki/api/v2/pages",
-        params={"spaceId": space_id, "title": title, "limit": 1},
-        headers=get_headers(),
-    )
-    r.raise_for_status()
-    results = r.json().get("results", [])
-    return results[0] if results else None
+    return _find_existing_page(ATLASSIAN_URL, get_headers(), space_id, title)
 
 
 def get_page_version(page_id: str) -> int:
-    r = requests.get(
-        f"{ATLASSIAN_URL}/wiki/api/v2/pages/{page_id}",
-        headers=get_headers(),
-    )
-    r.raise_for_status()
-    return r.json()["version"]["number"]
+    return _get_page_version(ATLASSIAN_URL, get_headers(), page_id)
 
 
 def list_child_pages(parent_id: str) -> list[dict]:
-    results = []
-    url = f"{ATLASSIAN_URL}/wiki/api/v2/pages/{parent_id}/children"
-    params: dict = {"limit": 250}
-    while url:
-        r = requests.get(url, params=params, headers=get_headers())
-        r.raise_for_status()
-        data = r.json()
-        results.extend(data.get("results", []))
-        url = data.get("_links", {}).get("next")
-        params = {}  # cursor is embedded in the next URL
-    return results
+    return _list_child_pages(ATLASSIAN_URL, get_headers(), parent_id)
 
 
 def delete_page(page_id: str):
-    r = requests.delete(
-        f"{ATLASSIAN_URL}/wiki/api/v2/pages/{page_id}",
-        headers=get_headers(),
-    )
-    r.raise_for_status()
+    _delete_page(ATLASSIAN_URL, get_headers(), page_id)
 
-# ---------------------------------------------------------------------------
-# Source ingestion
-# ---------------------------------------------------------------------------
 
 def _google_doc_html_to_adf(html: str) -> dict:
     """Convert Google Docs HTML export to ADF, preserving headings, lists, tables, and inline marks."""
@@ -910,27 +414,27 @@ def _google_doc_html_to_adf(html: str) -> dict:
         def __init__(self):
             super().__init__(convert_charrefs=True)
             self.nodes = []
-            self._buf   = []      # list of (text, marks[])
-            self._marks = []      # active inline marks stack
-            self._mode  = None    # 'heading' | 'para' | 'li' | 'cell'
+            self._buf = []
+            self._marks = []
+            self._mode = None
             self._hlevel = None
-            self._lists = []      # stack of ('ul'|'ol', [items])
+            self._lists = []
             self._table_rows = []
             self._row_buf = []
             self._cell_type = 'tableCell'
 
         def _style_marks(self, style):
-            s = style.lower().replace(' ', '')
-            m = []
-            if 'font-weight:bold' in s or 'font-weight:700' in s:
-                m.append({'type': 'strong'})
-            if 'font-style:italic' in s:
-                m.append({'type': 'em'})
-            if 'text-decoration:underline' in s:
-                m.append({'type': 'underline'})
-            if 'text-decoration:line-through' in s:
-                m.append({'type': 'strike'})
-            return m
+            normalized = style.lower().replace(' ', '')
+            marks = []
+            if 'font-weight:bold' in normalized or 'font-weight:700' in normalized:
+                marks.append({'type': 'strong'})
+            if 'font-style:italic' in normalized:
+                marks.append({'type': 'em'})
+            if 'text-decoration:underline' in normalized:
+                marks.append({'type': 'underline'})
+            if 'text-decoration:line-through' in normalized:
+                marks.append({'type': 'strike'})
+            return marks
 
         def _flush(self):
             inline = []
@@ -945,9 +449,11 @@ def _google_doc_html_to_adf(html: str) -> dict:
             return inline
 
         def handle_starttag(self, tag, attrs):
-            ad = dict(attrs)
+            attr_dict = dict(attrs)
             if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-                self._mode = 'heading'; self._hlevel = int(tag[1]); self._buf = []
+                self._mode = 'heading'
+                self._hlevel = int(tag[1])
+                self._buf = []
             elif tag == 'p':
                 if self._mode != 'cell':
                     self._mode = 'para'
@@ -955,7 +461,8 @@ def _google_doc_html_to_adf(html: str) -> dict:
             elif tag in ('ul', 'ol'):
                 self._lists.append((tag, []))
             elif tag == 'li':
-                self._mode = 'li'; self._buf = []
+                self._mode = 'li'
+                self._buf = []
             elif tag == 'table':
                 self._table_rows = []
             elif tag == 'tr':
@@ -973,8 +480,8 @@ def _google_doc_html_to_adf(html: str) -> dict:
             elif tag in ('s', 'strike'):
                 self._marks.append({'type': 'strike'})
             elif tag == 'span':
-                for m in self._style_marks(ad.get('style', '')):
-                    self._marks.append(m)
+                for mark in self._style_marks(attr_dict.get('style', '')):
+                    self._marks.append(mark)
 
         def handle_endtag(self, tag):
             if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
@@ -997,14 +504,15 @@ def _google_doc_html_to_adf(html: str) -> dict:
                 self._mode = None
             elif tag in ('ul', 'ol'):
                 if self._lists:
-                    ltype, items = self._lists.pop()
+                    list_type, items = self._lists.pop()
                     if items:
-                        ntype = 'orderedList' if ltype == 'ol' else 'bulletList'
-                        self.nodes.append({'type': ntype, 'content': items})
+                        node_type = 'orderedList' if list_type == 'ol' else 'bulletList'
+                        self.nodes.append({'type': node_type, 'content': items})
             elif tag in ('th', 'td'):
                 inline = self._flush()
                 self._row_buf.append({
-                    'type': self._cell_type, 'attrs': {},
+                    'type': self._cell_type,
+                    'attrs': {},
                     'content': [{'type': 'paragraph', 'content': inline}],
                 })
                 self._mode = None
@@ -1024,12 +532,12 @@ def _google_doc_html_to_adf(html: str) -> dict:
                     'b': 'strong', 'strong': 'strong', 'i': 'em', 'em': 'em',
                     'u': 'underline', 's': 'strike', 'strike': 'strike',
                 }.get(tag)
-                for i in range(len(self._marks) - 1, -1, -1):
-                    if target and self._marks[i].get('type') == target:
-                        self._marks.pop(i)
+                for index in range(len(self._marks) - 1, -1, -1):
+                    if target and self._marks[index].get('type') == target:
+                        self._marks.pop(index)
                         break
-                    elif tag == 'span':
-                        break  # pop the last mark added by this span
+                    if tag == 'span':
+                        break
 
         def handle_data(self, data):
             if self._mode in ('heading', 'para', 'li', 'cell') and data:
@@ -1037,7 +545,7 @@ def _google_doc_html_to_adf(html: str) -> dict:
 
     parser = _Parser()
     parser.feed(html)
-    return {'version': 1, 'type': 'doc', 'content': [n for n in parser.nodes if n]}
+    return {'version': 1, 'type': 'doc', 'content': [node for node in parser.nodes if node]}
 
 
 def ingest_google_doc(url: str) -> dict:
@@ -1559,27 +1067,16 @@ def create_page(
     labels: list[str] = None,
     status: str = "current",
 ) -> dict:
-    payload = {
-        "spaceId": space_id,
-        "status": status,
-        "title": title,
-        "body": {
-            "representation": "atlas_doc_format",
-            "value": json.dumps(adf_body),
-        },
-    }
-    if parent_id:
-        payload["parentId"] = parent_id
-    if labels:
-        payload["metadata"] = {"labels": [{"name": l} for l in labels]}
-
-    r = requests.post(
-        f"{ATLASSIAN_URL}/wiki/api/v2/pages",
-        headers=get_headers(),
-        json=payload,
+    return _create_page(
+        ATLASSIAN_URL,
+        get_headers(),
+        space_id,
+        title,
+        adf_body,
+        parent_id=parent_id,
+        labels=labels,
+        status=status,
     )
-    r.raise_for_status()
-    return r.json()
 
 
 def update_page(
@@ -1589,27 +1086,19 @@ def update_page(
     status: str = "current",
 ) -> dict:
     version = get_page_version(page_id)
-    payload = {
-        "id": page_id,
-        "status": status,
-        "title": title,
-        "version": {"number": version + 1},
-        "body": {
-            "representation": "atlas_doc_format",
-            "value": json.dumps(adf_body),
-        },
-    }
-    r = requests.put(
-        f"{ATLASSIAN_URL}/wiki/api/v2/pages/{page_id}",
-        headers=get_headers(),
-        json=payload,
+    return _update_page(
+        ATLASSIAN_URL,
+        get_headers(),
+        page_id,
+        title,
+        adf_body,
+        version,
+        status=status,
     )
-    r.raise_for_status()
-    return r.json()
 
 
 def page_url(page: dict) -> str:
-    return f"{ATLASSIAN_URL}/wiki{page['_links']['webui']}"
+    return _page_url(ATLASSIAN_URL, page)
 
 # ---------------------------------------------------------------------------
 # Mapping file loader
@@ -1647,52 +1136,7 @@ def build_space_tree(space_key: str) -> list:
     Returns a list of root-level node dicts; each node has:
       {id, title, type, children: [...]}
     """
-    results = []
-    start = 0
-    while True:
-        r = requests.get(
-            f"{ATLASSIAN_URL}/wiki/rest/api/content/search",
-            params={
-                "cql":    f'space="{space_key}" ORDER BY title',
-                "limit":  200,
-                "start":  start,
-                "expand": "ancestors",
-            },
-            headers=get_headers(),
-        )
-        r.raise_for_status()
-        data  = r.json()
-        batch = data.get("results", [])
-        results.extend(batch)
-        if not batch or len(results) >= data.get("totalSize", 0):
-            break
-        start += len(batch)
-
-    # Index nodes; direct parent = last element of ancestors array
-    nodes = {}
-    for item in results:
-        nodes[item["id"]] = {
-            "id":        item["id"],
-            "title":     item["title"],
-            "type":      item["type"],
-            "children":  [],
-            "parent_id": (item.get("ancestors") or [None])[-1],
-        }
-        # ancestors entries are dicts with "id"; last entry is direct parent
-        if nodes[item["id"]]["parent_id"] and isinstance(nodes[item["id"]]["parent_id"], dict):
-            nodes[item["id"]]["parent_id"] = nodes[item["id"]]["parent_id"]["id"]
-
-    # Wire up parent → children relationships
-    root_nodes = []
-    for node in nodes.values():
-        pid = node["parent_id"]
-        if pid and pid in nodes:
-            nodes[pid]["children"].append(node)
-        else:
-            root_nodes.append(node)
-
-    root_nodes.sort(key=lambda n: n["title"])
-    return root_nodes
+    return _build_space_tree(ATLASSIAN_URL, get_headers(), space_key)
 
 
 def _print_tree_nodes(nodes: list, indent: int = 0):
@@ -1721,64 +1165,17 @@ def _count_tree(nodes: list) -> tuple[int, int]:
 
 def fetch_page_adf(page_id: str) -> tuple:
     """Fetch a Confluence page and return (adf_body, title)."""
-    r = requests.get(
-        f"{ATLASSIAN_URL}/wiki/api/v2/pages/{page_id}",
-        params={"body-format": "atlas_doc_format"},
-        headers=get_headers(),
-    )
-    r.raise_for_status()
-    data = r.json()
-    title    = data["title"]
-    body_val = data.get("body", {}).get("atlas_doc_format", {}).get("value", "{}")
-    return json.loads(body_val), title
+    return _fetch_page_adf(ATLASSIAN_URL, get_headers(), page_id)
 
 
 def walk_descendant_pages(parent_id: str) -> list:
     """Return all descendant pages under parent_id using CQL ancestor search."""
-    results = []
-    start = 0
-    while True:
-        r = requests.get(
-            f"{ATLASSIAN_URL}/wiki/rest/api/content/search",
-            params={
-                "cql":   f"ancestor={parent_id} AND type=page ORDER BY title",
-                "limit": 100,
-                "start": start,
-            },
-            headers=get_headers(),
-        )
-        r.raise_for_status()
-        data  = r.json()
-        batch = data.get("results", [])
-        results.extend(batch)
-        if not batch or len(results) >= data.get("totalSize", 0):
-            break
-        start += len(batch)
-    return results
+    return _walk_descendant_pages(ATLASSIAN_URL, get_headers(), parent_id)
 
 
 def walk_space_pages(space_key: str) -> list:
     """Return all pages in a space using CQL."""
-    results = []
-    start = 0
-    while True:
-        r = requests.get(
-            f"{ATLASSIAN_URL}/wiki/rest/api/content/search",
-            params={
-                "cql":   f'space="{space_key}" AND type=page ORDER BY title',
-                "limit": 100,
-                "start": start,
-            },
-            headers=get_headers(),
-        )
-        r.raise_for_status()
-        data  = r.json()
-        batch = data.get("results", [])
-        results.extend(batch)
-        if not batch or len(results) >= data.get("totalSize", 0):
-            break
-        start += len(batch)
-    return results
+    return _walk_space_pages(ATLASSIAN_URL, get_headers(), space_key)
 
 
 def remediate_adf(adf: dict, template: str, missing_sections: list) -> dict:
@@ -2078,6 +1475,219 @@ def run_add_print_headers(space_key: str, folder: str = None, go: bool = False):
             fail += 1
 
     print(f"\nDone: {ok} updated, {fail} failed")
+
+
+def _prepare_adf_for_publish(source: str, template: str, title: str) -> tuple[dict, str]:
+    content = ingest_file(source)
+    adf = content if isinstance(content, dict) else to_adf(content, template)
+    json.loads(json.dumps(adf))
+
+    adf = strip_title_heading_from_adf(adf, title)
+    adf, heading_fixes = fix_adf_heading_numbers(adf)
+    if heading_fixes:
+        print(f"  Stripped number prefix from {heading_fixes} heading(s)")
+
+    adf = wrap_with_print_controls(adf, title, doc_id=extract_doc_id_from_title(title))
+
+    policy_text, _ = load_style_policy()
+    if policy_text:
+        for warning in check_adf_against_style_policy(adf, policy_text):
+            print(f"  ⚠  {warning}")
+
+    source_text = _extract_text_from_adf(adf.get("content", []))
+    detected_template = detect_template_from_text(source_text) if template == "general" else template
+    return adf, detected_template
+
+
+def _apply_regulation_title(title: str) -> str:
+    reg_cfg = load_regulation_config()
+    regulation = reg_cfg.get("regulation")
+    if not regulation:
+        return title
+    new_title = inject_regulation_doc_id(title, regulation)
+    if new_title != title:
+        print(f"[{REGULATION_CONFIGS[regulation]['name']}] Title updated: {title} → {new_title}")
+    return new_title
+
+
+def _print_compliance_warnings(source: str, detected_template: str, adf: dict):
+    missing_sections = check_template_sections(adf["content"], detected_template)
+    name_valid, name_example = validate_naming_convention(Path(source).stem, detected_template)
+    if not name_valid and not missing_sections:
+        print(f"\nCompliance warnings (template: {detected_template}):")
+    elif not name_valid or missing_sections:
+        print(f"\nCompliance warnings (template: {detected_template}):")
+    if not name_valid:
+        print(f"  ⚠  Naming convention: '{Path(source).stem}' does not match expected pattern")
+        print(f"     Expected format: {name_example}")
+    for section in missing_sections:
+        print(f"  ⚠  Missing required section: '{section}'")
+
+
+def _publish_single_file(args):
+    if not args.space:
+        print("ERROR: --space required for single file mode")
+        sys.exit(1)
+
+    print(f"Ingesting: {args.file}")
+    title = _apply_regulation_title(args.title or normalize_title(Path(args.file).stem))
+    adf, detected_template = _prepare_adf_for_publish(args.file, args.template, title)
+    _print_compliance_warnings(args.file, detected_template, adf)
+
+    labels = [label.strip() for label in args.labels.split(",")] if args.labels else []
+
+    if args.preview:
+        import tempfile
+        import webbrowser
+
+        html = adf_to_html(adf, title)
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8")
+        tmp.write(html)
+        tmp.close()
+        webbrowser.open(f"file://{tmp.name}")
+        print(f"\n[Preview] Opened in browser: {tmp.name}")
+        go = input("Continue to publish? [y/N] ").strip().lower()
+        if go != "y":
+            print(f"Aborted. Preview saved at: {tmp.name}")
+            return
+
+    print(f"\nUpload plan:")
+    print(f"  Title:    {title}")
+    print(f"  Space:    {args.space}")
+    print(f"  Parent:   {args.parent or '(space root)'}")
+    print(f"  Template: {args.template}")
+    print(f"  Labels:   {', '.join(labels) or 'none'}")
+
+    if args.dry_run:
+        print("\n[DRY RUN] Would publish the above. Done.")
+        return
+
+    if not args.go:
+        confirm = input("\nProceed? [y/N] ").strip().lower()
+        if confirm != "y":
+            print("Aborted.")
+            return
+
+    space_id = resolve_space_id(args.space)
+    parent_id = resolve_parent_id(args.space, args.parent) if args.parent else None
+    existing = find_existing_page(space_id, title)
+
+    if existing:
+        live_adf, _ = fetch_page_adf(existing["id"])
+        changed, diff_summary = diff_adf(live_adf, adf)
+        if not changed:
+            print(f"\nNo changes detected — '{title}' is already up to date. Skipped.")
+            return
+        print(f"\nUpdating '{title}':")
+        for line in diff_summary:
+            print(line)
+        page = update_page(existing["id"], title, adf)
+    else:
+        page = create_page(space_id, title, adf, parent_id, labels)
+
+    print(f"\nPublished: {page_url(page)}")
+
+
+def _publish_mapping(args):
+    rows = load_mapping(args.mapping)
+    print(f"\nLoaded {len(rows)} rows from mapping file.")
+
+    print(f"\n{'FILE':<40} {'TITLE':<40} {'SPACE':<8} {'PARENT':<30} {'TEMPLATE':<15}")
+    print("-" * 140)
+    for row in rows:
+        print(
+            f"{row.get('file',''):<40} {row.get('title','(auto)'):<40} "
+            f"{row.get('space_key',''):<8} {row.get('parent_page','(root)'):<30} "
+            f"{row.get('template', args.template):<15}"
+        )
+
+    if args.dry_run:
+        print("\n[DRY RUN] Would publish the above. Done.")
+        return
+
+    if not args.go:
+        confirm = input(f"\nProceed with publishing {len(rows)} pages? [y/N] ").strip().lower()
+        if confirm != "y":
+            print("Aborted.")
+            return
+
+    collision_default = "1" if args.go else None
+    apply_to_all = args.go
+    results = []
+
+    for row in rows:
+        source = row.get("file", "")
+        title = row.get("title", "").strip() or normalize_title(Path(source).stem)
+        try:
+            print(f"\nProcessing: {source}")
+            title = _apply_regulation_title(title)
+            template = row.get("template", args.template) or args.template
+            adf, detected_template = _prepare_adf_for_publish(source, template, title)
+
+            missing_sections = check_template_sections(adf["content"], detected_template)
+            name_valid, name_example = validate_naming_convention(Path(source).stem, detected_template)
+            if not name_valid:
+                print(f"  ⚠  Naming: '{Path(source).stem}' doesn't match {detected_template} pattern ({name_example})")
+            for section in missing_sections:
+                print(f"  ⚠  Missing section: '{section}'")
+
+            space_key = row.get("space_key", args.space or "")
+            parent_title = row.get("parent_page", "")
+            raw_labels = row.get("labels", "")
+            labels = [label.strip() for label in raw_labels.split(",")] if raw_labels else []
+            space_id = resolve_space_id(space_key)
+            parent_id = resolve_parent_id(space_key, parent_title) if parent_title else None
+            existing = find_existing_page(space_id, title)
+
+            if existing:
+                if apply_to_all and collision_default:
+                    choice = collision_default
+                else:
+                    print(f"  COLLISION: '{title}' exists.")
+                    raw = input("  1=Overwrite  2=Skip  3=Cancel all  Apply to all? [y/n]: ")
+                    parts = raw.strip().split()
+                    choice = parts[0] if parts else "2"
+                    if len(parts) > 1 and parts[1].lower() == "y":
+                        apply_to_all = True
+                        collision_default = choice
+
+                if choice == "3":
+                    print("Cancelled.")
+                    break
+                if choice == "2":
+                    results.append({"file": source, "title": title, "status": "SKIP", "url": ""})
+                    continue
+
+                live_adf, _ = fetch_page_adf(existing["id"])
+                changed, diff_summary = diff_adf(live_adf, adf)
+                if not changed:
+                    results.append({"file": source, "title": title, "status": "UNCHANGED", "url": page_url(existing)})
+                    print("  Unchanged — skipped.")
+                    continue
+                for line in diff_summary:
+                    print(f" {line}")
+                page = update_page(existing["id"], title, adf)
+            else:
+                page = create_page(space_id, title, adf, parent_id, labels)
+
+            url = page_url(page)
+            results.append({"file": source, "title": title, "status": "OK", "url": url})
+            print(f"  Published: {url}")
+        except Exception as exc:
+            results.append({"file": source, "title": title, "status": "FAIL", "url": str(exc)})
+            print(f"  FAILED: {exc}")
+
+    ok = sum(1 for result in results if result["status"] == "OK")
+    skip = sum(1 for result in results if result["status"] == "SKIP")
+    unchanged = sum(1 for result in results if result["status"] == "UNCHANGED")
+    fail = sum(1 for result in results if result["status"] == "FAIL")
+
+    print(f"\n{'='*60}")
+    print(f"Results: {ok} published, {unchanged} unchanged, {skip} skipped, {fail} failed")
+    print(f"{'FILE':<40} {'STATUS':<8} {'URL'}")
+    print("-" * 100)
+    for result in results:
+        print(f"{result['file']:<40} {result['status']:<8} {result['url']}")
 
 
 # ---------------------------------------------------------------------------
@@ -2389,248 +1999,12 @@ def main():
     if args.dry_run:
         print("[DRY RUN] No pages will be published.\n")
 
-    # Single file mode
     if args.file:
-        if not args.space:
-            print("ERROR: --space required for single file mode")
-            sys.exit(1)
-        print(f"Ingesting: {args.file}")
-        content = ingest_file(args.file)
-        # docx and Google Docs return ADF directly; other formats return plain text
-        adf = content if isinstance(content, dict) else to_adf(content, args.template)
-        json.loads(json.dumps(adf))  # validate
-
-        # Template detection and compliance checks
-        source_text = _extract_text_from_adf(adf.get('content', []))
-        detected_template = detect_template_from_text(source_text) if args.template == 'general' else args.template
-        missing_sections  = check_template_sections(adf['content'], detected_template)
-        name_valid, name_example = validate_naming_convention(Path(args.file).stem, detected_template)
-
-        if not name_valid or missing_sections:
-            print(f"\nCompliance warnings (template: {detected_template}):")
-            if not name_valid:
-                print(f"  \u26a0  Naming convention: '{Path(args.file).stem}' does not match expected pattern")
-                print(f"     Expected format: {name_example}")
-            for s in missing_sections:
-                print(f"  \u26a0  Missing required section: '{s}'")
-
-        title = args.title or normalize_title(Path(args.file).stem)
-
-        # Apply regulation document ID injection (if regulation is active)
-        reg_cfg    = load_regulation_config()
-        regulation = reg_cfg.get('regulation')
-        if regulation:
-            new_title = inject_regulation_doc_id(title, regulation)
-            if new_title != title:
-                print(f"[{REGULATION_CONFIGS[regulation]['name']}] Title updated: {title} → {new_title}")
-                title = new_title
-
-        # Strip leading title heading from ADF body (title lives in the Confluence title field)
-        adf = strip_title_heading_from_adf(adf, title)
-
-        # Strip any numbered heading prefixes (e.g. '1. Purpose' → 'Purpose')
-        adf, heading_fixes = fix_adf_heading_numbers(adf)
-        if heading_fixes:
-            print(f"  Stripped number prefix from {heading_fixes} heading(s)")
-
-        # Wrap with document control header and 'Uncontrolled when printed' footer
-        doc_id = extract_doc_id_from_title(title)
-        adf = wrap_with_print_controls(adf, title, doc_id=doc_id)
-
-        # Check against active style policy
-        policy_text, _ = load_style_policy()
-        if policy_text:
-            for w in check_adf_against_style_policy(adf, policy_text):
-                print(f"  \u26a0  {w}")
-
-        labels = [l.strip() for l in args.labels.split(",")] if args.labels else []
-
-        # Local HTML preview — open in browser before proceeding
-        if args.preview:
-            import tempfile, webbrowser
-            html = adf_to_html(adf, title)
-            tmp = tempfile.NamedTemporaryFile(
-                mode='w', suffix='.html', delete=False, encoding='utf-8'
-            )
-            tmp.write(html)
-            tmp.close()
-            webbrowser.open(f'file://{tmp.name}')
-            print(f"\n[Preview] Opened in browser: {tmp.name}")
-            go = input("Continue to publish? [y/N] ").strip().lower()
-            if go != 'y':
-                print(f"Aborted. Preview saved at: {tmp.name}")
-                return
-
-        print(f"\nUpload plan:")
-        print(f"  Title:    {title}")
-        print(f"  Space:    {args.space}")
-        print(f"  Parent:   {args.parent or '(space root)'}")
-        print(f"  Template: {args.template}")
-        print(f"  Labels:   {', '.join(labels) or 'none'}")
-
-        if args.dry_run:
-            print("\n[DRY RUN] Would publish the above. Done.")
-            return
-
-        if not args.go:
-            confirm = input("\nProceed? [y/N] ").strip().lower()
-            if confirm != "y":
-                print("Aborted.")
-                return
-
-        space_id = resolve_space_id(args.space)
-        parent_id = resolve_parent_id(args.space, args.parent) if args.parent else None
-        existing = find_existing_page(space_id, title)
-
-        if existing:
-            # Diff-aware update — skip the API call if nothing actually changed
-            live_adf, _ = fetch_page_adf(existing["id"])
-            changed, diff_summary = diff_adf(live_adf, adf)
-            if not changed:
-                print(f"\nNo changes detected — '{title}' is already up to date. Skipped.")
-                return
-            print(f"\nUpdating '{title}':")
-            for line in diff_summary:
-                print(line)
-            page = update_page(existing["id"], title, adf)
-        else:
-            page = create_page(space_id, title, adf, parent_id, labels)
-
-        print(f"\nPublished: {page_url(page)}")
+        _publish_single_file(args)
         return
 
-    # Bulk mode
     if args.mapping:
-        rows = load_mapping(args.mapping)
-        print(f"\nLoaded {len(rows)} rows from mapping file.")
-
-        print(f"\n{'FILE':<40} {'TITLE':<40} {'SPACE':<8} {'PARENT':<30} {'TEMPLATE':<15}")
-        print("-" * 140)
-        for row in rows:
-            print(f"{row.get('file',''):<40} {row.get('title','(auto)'):<40} "
-                  f"{row.get('space_key',''):<8} {row.get('parent_page','(root)'):<30} "
-                  f"{row.get('template', args.template):<15}")
-
-        if args.dry_run:
-            print("\n[DRY RUN] Would publish the above. Done.")
-            return
-
-        if not args.go:
-            confirm = input(f"\nProceed with publishing {len(rows)} pages? [y/N] ").strip().lower()
-            if confirm != "y":
-                print("Aborted.")
-                return
-
-        collision_default = "1" if args.go else None
-        apply_to_all = args.go
-        results = []
-
-        for row in rows:
-            source = row.get("file", "")
-            space_key = row.get("space_key", args.space or "")
-            template = row.get("template", args.template) or args.template
-            parent_title = row.get("parent_page", "")
-            raw_labels = row.get("labels", "")
-            labels = [l.strip() for l in raw_labels.split(",")] if raw_labels else []
-
-            try:
-                print(f"\nProcessing: {source}")
-                content = ingest_file(source)
-                adf = content if isinstance(content, dict) else to_adf(content, template)
-                json.loads(json.dumps(adf))  # validate
-
-                # Template detection and compliance checks
-                source_text = _extract_text_from_adf(adf.get('content', []))
-                detected_tmpl = detect_template_from_text(source_text) if template == 'general' else template
-                missing_sections = check_template_sections(adf['content'], detected_tmpl)
-                name_valid, name_example = validate_naming_convention(Path(source).stem, detected_tmpl)
-                if not name_valid:
-                    print(f"  \u26a0  Naming: '{Path(source).stem}' doesn't match {detected_tmpl} pattern ({name_example})")
-                for s in missing_sections:
-                    print(f"  \u26a0  Missing section: '{s}'")
-
-                # Apply naming convention if title blank
-                title = row.get("title", "").strip() or normalize_title(Path(source).stem)
-
-                # Regulation doc ID injection + title heading strip
-                reg_cfg    = load_regulation_config()
-                regulation = reg_cfg.get('regulation')
-                if regulation:
-                    new_title = inject_regulation_doc_id(title, regulation)
-                    if new_title != title:
-                        print(f"  [{REGULATION_CONFIGS[regulation]['name']}] Title: {title} → {new_title}")
-                        title = new_title
-                adf = strip_title_heading_from_adf(adf, title)
-                adf, heading_fixes = fix_adf_heading_numbers(adf)
-                if heading_fixes:
-                    print(f"  Stripped number prefix from {heading_fixes} heading(s)")
-                # Document control header and print footer
-                doc_id = extract_doc_id_from_title(title)
-                adf = wrap_with_print_controls(adf, title, doc_id=doc_id)
-
-                # Check against active style policy
-                policy_text, _ = load_style_policy()
-                if policy_text:
-                    for w in check_adf_against_style_policy(adf, policy_text):
-                        print(f"  \u26a0  {w}")
-
-                space_id = resolve_space_id(space_key)
-                parent_id = resolve_parent_id(space_key, parent_title) if parent_title else None
-                existing = find_existing_page(space_id, title)
-
-                if existing:
-                    if apply_to_all and collision_default:
-                        choice = collision_default
-                    else:
-                        print(f"  COLLISION: '{title}' exists.")
-                        raw = input("  1=Overwrite  2=Skip  3=Cancel all  Apply to all? [y/n]: ")
-                        parts = raw.strip().split()
-                        choice = parts[0] if parts else "2"
-                        if len(parts) > 1 and parts[1].lower() == "y":
-                            apply_to_all = True
-                            collision_default = choice
-
-                    if choice == "3":
-                        print("Cancelled.")
-                        break
-                    elif choice == "2":
-                        results.append({"file": source, "title": title, "status": "SKIP", "url": ""})
-                        continue
-                    else:
-                        # Diff-aware update — skip if content is unchanged
-                        live_adf, _ = fetch_page_adf(existing["id"])
-                        changed, diff_summary = diff_adf(live_adf, adf)
-                        if not changed:
-                            results.append({"file": source, "title": title,
-                                            "status": "UNCHANGED", "url": page_url(existing)})
-                            print(f"  Unchanged — skipped.")
-                            continue
-                        for line in diff_summary:
-                            print(f" {line}")
-                        page = update_page(existing["id"], title, adf)
-                else:
-                    page = create_page(space_id, title, adf, parent_id, labels)
-
-                url = page_url(page)
-                results.append({"file": source, "title": title, "status": "OK", "url": url})
-                print(f"  Published: {url}")
-
-            except Exception as e:
-                results.append({"file": source, "title": title, "status": "FAIL", "url": str(e)})
-                print(f"  FAILED: {e}")
-
-        # Summary
-        ok        = sum(1 for r in results if r["status"] == "OK")
-        skip      = sum(1 for r in results if r["status"] == "SKIP")
-        unchanged = sum(1 for r in results if r["status"] == "UNCHANGED")
-        fail      = sum(1 for r in results if r["status"] == "FAIL")
-
-        print(f"\n{'='*60}")
-        print(f"Results: {ok} published, {unchanged} unchanged, {skip} skipped, {fail} failed")
-        print(f"{'FILE':<40} {'STATUS':<8} {'URL'}")
-        print("-" * 100)
-        for r in results:
-            print(f"{r['file']:<40} {r['status']:<8} {r['url']}")
+        _publish_mapping(args)
         return
 
     parser.print_help()
