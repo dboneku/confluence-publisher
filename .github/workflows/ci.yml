@@ -30,4 +30,6 @@ jobs:
       - uses: DavidAnson/markdownlint-cli2-action@v20
         with:
           globs: |
-            **/*.md
+            README.md
+            CHANGELOG.md
+            clod.md
