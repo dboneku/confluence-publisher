@@ -53,10 +53,26 @@ Are you working under a specific regulatory framework? (e.g. ISO 27001)
 ```
 If they choose a regulation, run `/confluence-publisher:setregulation iso27001` to save it.
 
+**Title naming convention (applies to all publishes, regulation or not):**
+
+```
+[DOC_TYPE]-[ISO_CODE]-[SPACE]-[Document Name]
+```
+
+- **DOC_TYPE**: `POL`, `PRO`, `REC`, `GUI`, `STD`
+- **ISO_CODE**: primary Annex A control or clause (e.g. `A.5.1`) — include only if known
+- **SPACE**: Confluence space key (e.g. `ISMS`, `OHH`, `HR`)
+- **Document Name**: Title-cased, spaces preserved — never underscores
+
+Examples: `POL-A.5.1-ISMS-Information Security Policy`, `PRO-A.5.24-OHH-Incident Response Procedure`, `REC-OHH-Asset Inventory`
+
+**Document ID auto-assignment:** Do not use any local spreadsheet or tracker file. Query the target space live to find the max existing `DOC-YYYY-NNN` and assign next available. If the document already has a Document ID, preserve it.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/publish.py" --next-doc-id {SPACE_KEY}
+```
+
 **When a regulation is active during publishing:**
-- `publish.py` automatically fuzzy-matches the document title against the regulation's document catalog
-- If a match is found (Jaccard similarity ≥ 0.35), the document ID is inserted into the page title:
-  `OHH-POL-001 Information Security Policy` → `OHH-POL-001 02-ISMS Information Security Policy`
 - The first heading in the document body is stripped if it closely matches the page title (≥ 0.5 similarity), since Confluence shows the title separately in the page header
 
 ---
@@ -146,6 +162,8 @@ If `--go` is supported by the calling command: default to overwrite silently.
 ---
 
 ## Step 7 — Publish
+
+**No numbered headings:** Never prefix section headings with numbers in published ADF (e.g. use `"Purpose"` not `"1. Purpose"`). Confluence renders numbered headings as duplicate numbering artifacts. Strip any numeric prefixes from headings found in source documents before building ADF.
 
 Create page:
 ```python
@@ -254,8 +272,9 @@ Non-compliant pages:
 
 ### Step A4 — Remediate (if requested)
 
-For each page with missing sections:
+**Missing sections:** Do NOT auto-add missing sections. Report them to the user (they appear in the audit output from Step A3) and let the user decide whether to add them. Only insert a section when the user explicitly confirms it for a specific page.
 
+When a section addition is confirmed:
 1. Fetch ADF (already available from Step A2)
 2. Insert new nodes before `Revision History` heading (or at end if not present):
    ```json
@@ -265,7 +284,10 @@ For each page with missing sections:
 3. Preserve insertion order from the template's required section list
 4. `PUT /wiki/api/v2/pages/{id}` with version+1 and the patched ADF
 
-**Never auto-fix naming violations** — report them and ask the user to rename in Confluence.
+**Naming violations:** Do not attempt to fix naming violations here. Direct the user to:
+```
+/confluence-publisher:renametitles {SPACE_KEY} [--folder "..."]
+```
 
 Always show a remediation plan and wait for confirmation before making any changes (unless `--go` is set).
 

@@ -1380,34 +1380,96 @@ def run_remediate(space_key: str, folder: str = None, go: bool = False):
 
 
 def run_fix_heading_numbers(space_key: str, folder: str = None, go: bool = False):
-    """Scan all pages in a space (or folder) for numbered heading prefixes and strip them."""
-    print(f"\nScanning for numbered heading prefixes in {space_key}" +
-          (f" / '{folder}'" if folder else "") + " ...")
+    run_fix_heading_numbers_multi(space_key=space_key, folder=folder, go=go, all_spaces=False)
 
-    if folder:
-        parent_id = resolve_parent_id(space_key, folder)
-        pages = walk_descendant_pages(parent_id)
-    else:
-        pages = walk_space_pages(space_key)
 
-    plan = []  # list of {page_id, title, count, new_adf}
-    for page in pages:
-        adf, title = fetch_page_adf(page['id'])
-        fixed_adf, count = fix_adf_heading_numbers(adf)
-        if count > 0:
-            plan.append({'page_id': page['id'], 'title': title,
-                         'count': count, 'new_adf': fixed_adf})
+def _list_target_spaces(space_key: str | None = None, all_spaces: bool = False) -> list[dict]:
+    if all_spaces:
+        spaces = [
+            space for space in list_spaces()
+            if space.get("key")
+            and not str(space.get("key")).startswith("~")
+            and str(space.get("status", "current")).lower() == "current"
+            and str(space.get("type", "global")).lower() == "global"
+        ]
+        return sorted(spaces, key=lambda item: item["key"])
+    return [{"key": space_key, "name": space_key}] if space_key else []
+
+
+def run_fix_heading_numbers_multi(
+    space_key: str | None = None,
+    folder: str | None = None,
+    go: bool = False,
+    all_spaces: bool = False,
+):
+    """Scan pages for numbered heading-like blocks and normalize them."""
+    if all_spaces and folder:
+        raise ValueError("--folder cannot be combined with --all-spaces")
+
+    target_spaces = _list_target_spaces(space_key=space_key, all_spaces=all_spaces)
+    if not target_spaces:
+        raise ValueError("A space key is required unless --all-spaces is used")
+
+    target_label = "all spaces" if all_spaces else space_key
+    print(
+        f"\nScanning for numbered heading prefixes in {target_label}"
+        + (f" / '{folder}'" if folder else "")
+        + " ..."
+    )
+
+    plan = []
+    scan_errors = []
+    pages_scanned = 0
+    for space in target_spaces:
+        current_space_key = space["key"]
+        try:
+            if folder:
+                parent_id = resolve_parent_id(current_space_key, folder)
+                pages = walk_descendant_pages(parent_id)
+            else:
+                pages = walk_space_pages(current_space_key)
+        except Exception as exc:
+            scan_errors.append((current_space_key, str(exc)))
+            continue
+
+        for page in pages:
+            pages_scanned += 1
+            try:
+                adf, title = fetch_page_adf(page["id"])
+                fixed_adf, count = fix_adf_heading_numbers(adf)
+                if count > 0:
+                    plan.append(
+                        {
+                            "space_key": current_space_key,
+                            "page_id": page["id"],
+                            "title": title,
+                            "count": count,
+                            "new_adf": fixed_adf,
+                        }
+                    )
+            except Exception as exc:
+                scan_errors.append((f"{current_space_key}:{page.get('title', page['id'])}", str(exc)))
 
     if not plan:
-        print("\n\u2713 No numbered heading prefixes found.")
+        print(f"\n\u2713 No numbered heading issues found across {pages_scanned} page(s).")
+        if scan_errors:
+            print("\nScan errors:")
+            for location, error in scan_errors:
+                print(f"  {location}: {error}")
         return
 
-    print(f"\nFix plan \u2014 {len(plan)} page(s) with numbered heading prefixes:\n")
-    print("\u2500" * 60)
-    for p in plan:
-        print(f"  {p['title']}")
-        print(f"    {p['count']} heading(s) will have number prefix stripped")
+    print(f"\nFix plan \u2014 {len(plan)} page(s) across {len(target_spaces)} space(s):\n")
+    print("\u2500" * 70)
+    for item in plan:
+        print(f"  [{item['space_key']}] {item['title']}")
+        print(f"    {item['count']} numbered heading block(s) will be normalized")
     print()
+
+    if scan_errors:
+        print("Scan errors:")
+        for location, error in scan_errors:
+            print(f"  {location}: {error}")
+        print()
 
     if not go:
         confirm = input("Proceed? [y/N] ").strip().lower()
@@ -1416,13 +1478,13 @@ def run_fix_heading_numbers(space_key: str, folder: str = None, go: bool = False
             return
 
     ok, fail = 0, 0
-    for p in plan:
+    for item in plan:
         try:
-            update_page(p['page_id'], p['title'], p['new_adf'])
-            print(f"  \u2713  {p['title']}")
+            update_page(item['page_id'], item['title'], item['new_adf'])
+            print(f"  \u2713  [{item['space_key']}] {item['title']}")
             ok += 1
-        except Exception as e:
-            print(f"  \u2717  {p['title']}: {e}")
+        except Exception as exc:
+            print(f"  \u2717  [{item['space_key']}] {item['title']}: {exc}")
             fail += 1
 
     print(f"\nDone: {ok} fixed, {fail} failed")
@@ -1832,7 +1894,10 @@ def main():
     parser.add_argument("--list-regulation-docs",  metavar="REGULATION",
                         help="List the document catalog for a regulation and exit")
     parser.add_argument("--fix-heading-numbers",   metavar="SPACE_KEY",
-                        help="Scan and fix restarting numbered headings in existing Confluence pages")
+                        nargs="?",
+                        help="Scan and fix numbered heading blocks in existing Confluence pages")
+    parser.add_argument("--all-spaces",            action="store_true",
+                        help="Apply compatible scan/fix operations across all current global Confluence spaces")
     parser.add_argument("--add-print-headers",      metavar="SPACE_KEY",
                         help="Add document control header and print footer to pages that are missing them")
     parser.add_argument("--set-policy",            metavar="SOURCE",
@@ -1880,8 +1945,20 @@ def main():
         return
 
     # Fix heading numbers mode
-    if args.fix_heading_numbers:
-        run_fix_heading_numbers(args.fix_heading_numbers, folder=args.folder, go=args.go)
+    if args.fix_heading_numbers is not None or args.all_spaces:
+        if args.fix_heading_numbers is None and not args.all_spaces:
+            print("ERROR: --fix-heading-numbers requires a SPACE_KEY unless --all-spaces is set")
+            sys.exit(1)
+        try:
+            run_fix_heading_numbers_multi(
+                space_key=args.fix_heading_numbers,
+                folder=args.folder,
+                go=args.go,
+                all_spaces=args.all_spaces,
+            )
+        except Exception as e:
+            print(f"Error fixing heading numbers: {e}")
+            sys.exit(1)
         return
 
     # Add print headers mode

@@ -54,8 +54,8 @@ Audit Confluence pages for template compliance. Read-only — no pages are modif
 
 6. After the report, suggest:
    ```
-   To auto-remediate missing sections: /confluence-publisher:remediate OHH [--folder "..."]
-   Naming convention violations require manual page renames in Confluence.
+   To auto-remediate missing sections:    /confluence-publisher:remediate OHH [--folder "..."]
+   To rename titles to match convention:  /confluence-publisher:renametitles OHH [--folder "..."]
    ```
 
 7. Do not modify any pages.

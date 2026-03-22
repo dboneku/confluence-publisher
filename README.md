@@ -127,11 +127,74 @@ Audit then automatically patch non-compliant pages by inserting warning-panel pl
 
 Shows a remediation plan (which pages, which sections) before making any changes. Missing sections are inserted before `Revision History` (or appended at end) as an H2 heading + yellow warning panel with `[TO BE COMPLETED — Section Name]`. Naming convention violations are reported but require manual renaming in Confluence.
 
+### `/confluence-publisher:fixheadingnumbers [<space-key> | --all-spaces] [--folder "Name"] [--go]`
+
+Scan existing Confluence pages for numbered heading-like blocks and normalize them.
+
+```text
+/confluence-publisher:fixheadingnumbers OHH
+/confluence-publisher:fixheadingnumbers OHH --folder "Legal"
+/confluence-publisher:fixheadingnumbers --all-spaces --go
+```
+
+The fixer strips numeric prefixes like `1. Purpose` or `2.1 Scope`, converts short numbered paragraphs into headings, defaults them to H1, and uses a simple heuristic when it sees an adjacent `1` then `2` pair: the `1` becomes H1 and following numbered headings remain H2 until another adjacent `1` then `2` pair starts a new major section.
+
 ## Document Control with eSign for Confluence
 
 If you need formal document control — approvers, reviewers, e-signature workflows, retention policies — the [eSign for Confluence](https://marketplace.atlassian.com/apps/1217038/esign-for-confluence) app supports **bulk configuration by document ID prefix** through its Space Settings UI. No scripting required.
 
 **Plugin documentation:** [eSign for Confluence docs](https://support.esign-app.com/edoc) | [Space Settings guide](https://support.esign-app.com/edoc/guide/config/space-settings)
+
+If you want to apply the same eSign document-type policy across many spaces, use [scripts/sync_esign_space_settings.py](scripts/sync_esign_space_settings.py). The eSign docs describe webhook event payloads and space-level settings, but they do not publish a supported admin REST API for bulk updates, so the script uses Confluence REST to list spaces and Playwright to drive the eSign Space Settings UI.
+
+### Bulk sync script
+
+The included sync script standardizes these document types:
+
+- `POL` — Policy
+- `PRO` — Procedure / Process
+- `FRM` — Form
+- `REC` — Record
+
+It configures annual review, annual approval, annual training, and sets these document admins:
+
+- `nick@clinicaloversite.com`
+- `doug@clinicaloversite.com`
+- `janet@clinicaloversite.com`
+
+Setup:
+
+```bash
+pip install -r scripts/requirements.txt
+playwright install chromium
+```
+
+Save a logged-in Playwright session once, for example with:
+
+```bash
+playwright codegen https://oversite-health.atlassian.net --save-storage ~/.config/confluence/storage-state.json
+```
+
+Then run the sync in dry-run mode first:
+
+```bash
+python scripts/sync_esign_space_settings.py \
+   --storage-state ~/.config/confluence/storage-state.json \
+   --settings-url-template 'https://oversite-health.atlassian.net/wiki/spaces/{spaceKey}/settings/apps/{appPath}' \
+   --app-path 'com.digitalrose.edoc__space-settings'
+```
+
+Apply the changes after verifying the plan:
+
+```bash
+python scripts/sync_esign_space_settings.py \
+   --storage-state ~/.config/confluence/storage-state.json \
+   --settings-url-template 'https://oversite-health.atlassian.net/wiki/spaces/{spaceKey}/settings/apps/{appPath}' \
+   --app-path 'com.digitalrose.edoc__space-settings' \
+   --apply
+```
+
+The exact `--app-path` can vary by eSign installation. Open one working eSign Space Settings page in the browser, copy its URL once, and use the matching route segment here.
 
 ### How it works
 

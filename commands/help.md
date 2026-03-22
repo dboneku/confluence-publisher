@@ -108,6 +108,15 @@ COMPLIANCE & CLEANUP
     Example: /confluence-publisher:addprintheaders
     Example: /confluence-publisher:addprintheaders OHH --folder "Policies" --go
 
+  /confluence-publisher:renametitles [SPACE_KEY] [--folder "Name"] [--go]
+    Scan all pages in a space and rename titles to match the standard convention:
+    [DOC_TYPE]-[ISO_CODE]-[SPACE]-[Document Name]
+    Auto-fixes clear cases (wrong format, underscores, old numbering). Queues
+    ambiguous doc types for you to specify. Always shows a preview before
+    changing anything unless --go is passed.
+    Example: /confluence-publisher:renametitles ISMS
+    Example: /confluence-publisher:renametitles OHH --folder "Policies" --go
+
   /confluence-publisher:analyze <file>
     Analyze a local file's structure, detected template, and compliance
     before publishing. Does not connect to Confluence.

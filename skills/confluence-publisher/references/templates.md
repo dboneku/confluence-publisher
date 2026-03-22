@@ -14,6 +14,8 @@
 
 If two templates score equally or match is weak, ask the user.
 
+**Missing sections:** Never auto-add missing sections during publish or remediation. Identify them in the audit report and ask the user which (if any) to add. Only add what is explicitly confirmed.
+
 ---
 
 ## Required Sections by Template
@@ -73,13 +75,25 @@ For clinical/healthcare content: always include A.8.10 (Data Masking), A.5.33 (P
 
 ## Naming Conventions
 
-| Template | Default pattern |
+All document types use the same convention:
+
+```
+[DOC_TYPE]-[ISO_CODE]-[SPACE]-[Document Name]
+```
+
+| Part | Rule |
 |---|---|
-| Policy | `[Org]-POL-[NN] [Title]` |
-| Procedure | `[Org]-PRO-[NN] [Title]` |
-| Workflow | `[Org]-WF-[NN] [Title]` |
-| Form | `[Org]-FRM-[NN] [Title]` |
-| Checklist | `[Org]-CHK-[NN] [Title]` |
-| Meeting Minutes | `[YYYY-MM-DD] [Team] Meeting Minutes` |
-| ISO 27001 | `[Org]-[NN]-[DOMAIN] [Title] ([Type])` |
-| General | Use source filename (normalized — collapse spaces around hyphens) |
+| DOC_TYPE | `POL`, `PRO`, `REC`, `GUI`, `STD` — required |
+| ISO_CODE | Primary Annex A control or clause (e.g. `A.5.1`, `6.1.2`) — omit if unknown |
+| SPACE | Confluence space key (e.g. `ISMS`, `OHH`, `HR`) — required |
+| Document Name | Title-cased, spaces preserved — **never underscores** |
+
+Examples:
+- `POL-A.5.1-ISMS-Information Security Policy`
+- `PRO-A.5.24-OHH-Incident Response Procedure`
+- `REC-OHH-Asset Inventory`
+- `GUI-A.8.1-ISMS-Endpoint Security Guideline`
+
+**Meeting Minutes** (no DOC_TYPE prefix): `[YYYY-MM-DD] [Team] Meeting Minutes`
+
+**Document ID** (metadata field, not the title): `DOC-YYYY-NNN` — always auto-assigned from live Confluence query. Never use a local spreadsheet or tracker. Strip any old-format prefixes (e.g. `OHH-POL-001`, `OverSite 09-IS`) and reformat to the convention above.
