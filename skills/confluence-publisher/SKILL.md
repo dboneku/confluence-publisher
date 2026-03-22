@@ -56,17 +56,32 @@ If they choose a regulation, run `/confluence-publisher:setregulation iso27001` 
 **Title naming convention (applies to all publishes, regulation or not):**
 
 ```
-[DOC_TYPE]-[ISO_CODE]-[SPACE]-[Document Name]
+[DOC_TYPE]-[DOC_NUMBER]-[ISO_BRACKET]-[ORG_CODE]-[Document Name]
 ```
 
-- **DOC_TYPE**: `POL`, `PRO`, `REC`, `GUI`, `STD`
-- **ISO_CODE**: primary Annex A control or clause (e.g. `A.5.1`) — include only if known
-- **SPACE**: Confluence space key (e.g. `ISMS`, `OHH`, `HR`)
+- **DOC_TYPE**: `POL`, `PRO`, `FRM`, `REC`, `GEN`
+- **DOC_NUMBER**: 4-digit zero-padded number assigned per document (e.g. `1002`, `0007`)
+- **ISO_BRACKET**: optional — regulation bracket if applicable (e.g. `[01-ISMS]`) — omit entirely if not used
+- **ORG_CODE**: the organization/space code used in titles — provided by the user, not necessarily the Confluence space key
 - **Document Name**: Title-cased, spaces preserved — never underscores
 
-Examples: `POL-A.5.1-ISMS-Information Security Policy`, `PRO-A.5.24-OHH-Incident Response Procedure`, `REC-OHH-Asset Inventory`
+**DOC_TYPE classification:**
+| Code | Use for |
+|---|---|
+| `POL` | Policies |
+| `PRO` | Processes and procedures |
+| `FRM` | Templates and forms |
+| `REC` | Records — filled-out instances of forms/templates |
+| `GEN` | Guides, how-tos, reference pages, overviews |
 
-**Document ID auto-assignment:** Do not use any local spreadsheet or tracker file. Query the target space live to find the max existing `DOC-YYYY-NNN` and assign next available. If the document already has a Document ID, preserve it.
+Examples (illustrative — substitute your own org code and numbers):
+- `POL-1002-[01-ISMS]-ABC-Scope of the ISMS`
+- `PRO-1068-ABC-Vulnerability Management Procedure`
+- `FRM-0007-ABC-Production Push Checklist`
+- `REC-2036-ABC-Access Review Record 2025-11-19`
+- `GEN-2037-ABC-Engineering Development Guide`
+
+**Doc number assignment:** Do not use any local spreadsheet or tracker file. Query the target space live to find the highest existing 4-digit number across all page titles and assign next available.
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/publish.py" --next-doc-id {SPACE_KEY}
@@ -237,7 +252,9 @@ Use CQL (`/wiki/rest/api/content/search`) — the v2 pages API silently omits fo
 
 ### Step A2 — Audit Each Page
 
-For each page:
+**Skip eSign versioning pages:** Pages whose titles begin with a pattern like `NNNN(01)`, `NNNN(02)`, etc. (e.g. `0007(01) FRM-0007-...`) are document control versioning artifacts automatically created by the eSign / Document Control plugin. Do not flag, rename, or include these in any audit or title cleanup output — ignore them entirely.
+
+For each remaining page:
 1. `GET /wiki/api/v2/pages/{id}?body-format=atlas_doc_format` — fetch ADF body
 2. Extract plain text from ADF using `_extract_text_from_adf()`
 3. `detect_template_from_text(text)` — infer template type
@@ -284,10 +301,104 @@ When a section addition is confirmed:
 3. Preserve insertion order from the template's required section list
 4. `PUT /wiki/api/v2/pages/{id}` with version+1 and the patched ADF
 
-**Naming violations:** Do not attempt to fix naming violations here. Direct the user to:
-```
-/confluence-publisher:renametitles {SPACE_KEY} [--folder "..."]
-```
+**Naming violations:** Do not attempt to fix naming violations here. Direct the user to run the Bulk Title Rename workflow (Steps R1–R5 below).
 
 Always show a remediation plan and wait for confirmation before making any changes (unless `--go` is set).
+
+---
+
+## Bulk Title Rename (Steps R1–R5)
+
+Use when the user asks to "clean up titles", "fix page names", "rename pages", or "bulk rename" in a space.
+
+### Step R1 — Run Audit to Find Naming Violations
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/publish.py" --audit {SPACE_KEY}
+```
+
+From the output, collect only pages listed under "Naming violations". Ignore all other audit findings (missing sections, etc.).
+
+### Step R2 — Categorize Violations
+
+Split naming violations into two buckets:
+
+**Bucket A — Formatting errors** (already have a doc number prefix, but malformed):
+- Underscores in title (e.g. `PRO-2035-ABC-Risk_Based_Testing_Process`)
+- Other character encoding issues
+
+Fix: replace underscores with spaces. Preserve the existing doc number.
+
+**Bucket B — Missing doc prefix** (no `DOC_TYPE-NNNN` prefix at all):
+- Date-stamped pages (e.g. `11-19-2025 - Access Review Record`)
+- Plain-language titles (e.g. `Logging and Monitoring Process`)
+
+For Bucket B, propose a doc type for each page based on the classification rules and ask the user to confirm — do not silently assume. Present it like:
+
+```
+These pages are missing a doc type prefix. Proposed renames — confirm or correct each:
+
+  "Logging and Monitoring Process"  → PRO-XXXX-[ORG]-Logging and Monitoring Process  [process]
+  "Creating JIRAs"                  → PRO-XXXX-[ORG]-Creating JIRAs                  [process — confirm?]
+  "Change Risk Assessment"          → FRM or REC? ← ask user
+  "11-19-2025 - Access Review"      → REC-XXXX-[ORG]-Access Review 2025-11-19        [record]
+```
+
+For records with date stamps, move the date to the end of the title in ISO format (`YYYY-MM-DD`).
+
+Always skip: eSign versioning pages (`NNNN(01)` prefix), space homepages, folder pages, and PDF attachment pages.
+
+### Step R3 — Assign Doc Numbers
+
+For each Bucket B page that needs a new number, query the space live — do not use any local spreadsheet:
+
+```python
+# CQL to find all existing doc numbers in the space
+GET /wiki/rest/api/content/search?cql=space="{KEY}" AND type=page&limit=200&expand=title
+# Extract all NNNN numbers from titles using regex \b(\d{4})\b, take max+1
+```
+
+Assign numbers sequentially across all pages in this rename batch. Show the full proposed number sequence in the rename plan.
+
+### Step R4 — Show Rename Plan and Confirm
+
+Before touching anything, print:
+
+```
+Rename plan — {SPACE_KEY} ({N} pages):
+
+  Current title                               New title
+  ──────────────────────────────────────────  ──────────────────────────────────────────
+  PRO-2035-ABC-Risk_Based_Testing_Process     PRO-2035-ABC-Risk Based Testing Process
+  Logging and Monitoring Process              PRO-2042-ABC-Logging and Monitoring Process
+  11-19-2025 - Access Review Record           REC-2037-ABC-Access Review Record 2025-11-19
+  Incident Response Plan                      [NEEDS INPUT — doc type?]
+
+Confirm? (yes / adjust / cancel)
+```
+
+Wait for explicit confirmation before proceeding.
+
+### Step R5 — Execute Renames
+
+For each rename:
+
+```python
+# 1. Fetch current version (required for optimistic locking)
+GET /wiki/rest/api/content/search?cql=space="{KEY}" AND title="{OLD_TITLE}"&expand=version&limit=1
+
+# 2. PUT with version+1 — body omitted to preserve existing content
+PUT /wiki/api/v2/pages/{id}
+{ "id": id, "status": "current", "title": new_title, "version": { "number": current_version + 1 } }
+```
+
+**409 conflict handling:** Re-fetch the page to get the latest version and retry once. If it fails again, report as FAIL and continue.
+
+Print results as each rename completes:
+```
+OK   "Logging and Monitoring Process" → "PRO-2042-ABC-Logging and Monitoring Process"
+FAIL "On-Call Process" → 409 conflict (retried, failed)
+```
+
+Print totals at the end: X renamed, Y failed.
 

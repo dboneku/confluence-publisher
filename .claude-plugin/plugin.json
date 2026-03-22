@@ -1,27 +1,8 @@
 {
   "name": "confluence-publisher",
-  "version": "0.1.0",
-  "description": "Convert .docx files and Google Docs into properly structured Confluence pages with structural analysis, formatting cleanup, and direct publishing via the Confluence Cloud REST API. Works as a Claude Code CLI plugin (full automated conversion and publishing via Python scripts) and as a Claude.ai / coworker skill (structural analysis and API-based publishing from uploaded document content).",
+  "description": "Publish, audit, and remediate Confluence pages from local documents (.docx, Google Docs, PDF, Excel). Supports bulk publishing, style policy enforcement, ISO 27001 regulation context, and title convention management.",
+  "version": "1.0.0",
   "author": {
-    "name": "dboneku",
-    "url": "https://github.com/dboneku/confluence-publisher"
-  },
-  "license": "MIT",
-  "repository": "https://github.com/dboneku/confluence-publisher",
-  "homepage": "https://github.com/dboneku/confluence-publisher",
-  "readme": "README.md",
-  "keywords": [
-    "confluence",
-    "atlassian",
-    "docx",
-    "google-docs",
-    "publishing",
-    "documentation",
-    "markdown",
-    "adf"
-  ],
-  "categories": [
-    "productivity",
-    "documentation"
-  ]
+    "name": "dboneku"
+  }
 }
